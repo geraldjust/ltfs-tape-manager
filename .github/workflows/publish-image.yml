@@ -26,4 +26,4 @@ jobs:
         with:
           context: ./app
           push: true
-          tags: ghcr.io/geraldjust/ltfs-tape-manager:1.2.0.3
+          tags: ghcr.io/geraldjust/ltfs-tape-manager:1.2.0.4
