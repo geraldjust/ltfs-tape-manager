@@ -1,7 +1,7 @@
-# TEMPLATE ONLY: NOT YET VALIDATED FOR PRODUCTION.
-# Replace POOL_NAME and TAPE_DEVICE_* with your own TrueNAS settings.
-# Requires a public GHCR package and host tape mount propagation configured.
-# WARNING: Docker socket access grants host-level control. Trusted administrators only.
+# PREVIEW ONLY — image is not published yet; do not install until validated.
+# Replace /mnt/example with your own pool and the tape device placeholders below.
+# Configure the host tape mountpoint as shared and verify propagation before mounting.
+# Docker socket access is host-equivalent privilege: trusted admins only.
 services:
   manager:
     image: ghcr.io/geraldjust/ltfs-tape-manager:1.2.0.2
@@ -11,20 +11,20 @@ services:
     ports:
       - "8081:8080"
     devices:
-      - "/dev/TAPE_DEVICE_SG:/dev/TAPE_DEVICE_SG:rwm"
-      - "/dev/TAPE_DEVICE_NST:/dev/TAPE_DEVICE_NST:rwm"
+      - "/dev/sgX:/dev/sgX:rwm"
+      - "/dev/nstX:/dev/nstX:rwm"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /mnt/POOL_NAME/LTFS:/tape:rslave
-      - /mnt/POOL_NAME/LTFS-READ:/destination:rw
-      - /mnt/POOL_NAME/LTFS-WRITE:/write-source:ro
-      - /mnt/POOL_NAME/LTFS-Manager/simple-state:/state-simple:rw
+      - /mnt/example/LTFS:/tape:rslave
+      - /mnt/example/LTFS-READ:/destination:rw
+      - /mnt/example/LTFS-WRITE:/write-source:ro
+      - /mnt/example/LTFS-Manager/simple-state:/state-simple:rw
     environment:
-      HOST_TAPE_PATH: /mnt/POOL_NAME/LTFS
-      HOST_READ_PATH: /mnt/POOL_NAME/LTFS-READ
-      HOST_WRITE_PATH: /mnt/POOL_NAME/LTFS-WRITE
-      SG_DEVICE: /dev/TAPE_DEVICE_SG
-      NST_DEVICE: /dev/TAPE_DEVICE_NST
+      HOST_TAPE_PATH: /mnt/example/LTFS
+      HOST_READ_PATH: /mnt/example/LTFS-READ
+      HOST_WRITE_PATH: /mnt/example/LTFS-WRITE
+      SG_DEVICE: /dev/sgX
+      NST_DEVICE: /dev/nstX
       LTFS_MANAGER_NAME: ltfs-simple-manager
       LTFS_WORKER_NAME: aurora-ltfs
       AURORA_IMAGE: ghcr.io/auroratape/aurora-ltfs:1.0.0
