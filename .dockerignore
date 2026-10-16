@@ -1,0 +1,17 @@
+**/.git
+**/.env
+**/.env.*
+**/*.log
+**/*.sqlite
+**/*.db
+**/*.zip
+**/*.bin
+**/*.tar
+**/*.tgz
+**/__pycache__
+**/*.pyc
+**/state
+**/simple-state
+**/logs
+**/backups
+**/.DS_Store
