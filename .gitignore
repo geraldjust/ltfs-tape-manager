@@ -1,0 +1,19 @@
+# Local installation data and secrets
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.db
+*.zip
+__pycache__/
+*.pyc
+state/
+simple-state/
+logs/
+backups/
+*.bin
+*.tar
+*.tgz
+*.jsonl
+.DS_Store
