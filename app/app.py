@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-simple-manager')
-VERSION='1.2.0.2'
+VERSION='1.2.0.3'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -712,7 +712,7 @@ def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
                 update(bytes_done=base_bytes+current)
             except (ValueError,RuntimeError,IndexError):
                 pass
-    # Preserve exclusive create (set -C), original cat transfer and error propagation.
+    # Preserve exclusive tape-file creation (set -C), but disable noclobber only\n    # in the progress writer subshell so repeated progress updates can succeed.
     # Linux /proc/PID/io rchar counts bytes consumed from the source; it may lead
     # physical tape persistence. Commit and SHA-256 remain the authoritative checks.
     script='''set -eu
@@ -723,7 +723,7 @@ pid=$!
 trap 'rm -f -- "$3"' EXIT
 while kill -0 "$pid" 2>/dev/null; do
   if [ -r "/proc/$pid/io" ]; then
-    awk '/^rchar:/ {print $2}' "/proc/$pid/io" > "$3" 2>/dev/null || true
+    (set +C; awk '/^rchar:/ {print $2}' "/proc/$pid/io" > "$3") 2>/dev/null || true
   fi
   sleep 2
 done
