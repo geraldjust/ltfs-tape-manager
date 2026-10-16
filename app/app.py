@@ -22,7 +22,9 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-simple-manager')
-VERSION='1.2.0.3'
+VERSION='1.2.0.4'
+# Diagnostic release: foreground writes by default; opt in to legacy live progress.
+WRITE_PROGRESS=os.environ.get('LTFS_WRITE_PROGRESS','0')=='1'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -111,10 +113,25 @@ def wait_mode(target, seconds=90):
         except Exception: pass
     raise RuntimeError(f'LTFS did not reach {target} mode within {seconds}s (now {mode()}). Recent Aurora logs: '+detail)
 
+def save_aurora_logs(c, label='stop'):
+    """Persist worker output outside the disposable Aurora container."""
+    try:
+        logs=c.logs(stdout=True,stderr=True).decode('utf-8','replace')
+        stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        # Avoid embedding source paths, tape identifiers, or user filenames in log names.
+        path=STATE/('aurora-'+stamp+'-'+uuid.uuid4().hex[:8]+'.log')
+        path.write_text('Aurora capture: '+label+' at '+stamp+'\\n'+logs)
+        (STATE/'aurora-last.log').write_text(logs)
+        return str(path)
+    except Exception as exc:
+        app.logger.warning('Cannot preserve Aurora logs: %s', exc)
+        return None
+
 def stop_aurora():
     c=aurora()
     if c:
         if c.status=='running':c.stop(timeout=300)
+        save_aurora_logs(c)
         c.remove()
     wait_mode('unmounted',30)
 
@@ -699,6 +716,17 @@ def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
     Progress is informational; only a successful copy plus SHA-256 counts as written.
     No tape-side metadata queries are performed during streaming.
     """
+    if not WRITE_PROGRESS:
+        # Diagnostic mode: foreground copy, no /proc polling or background shell.
+        # Exclusive creation prevents overwriting existing tape files.
+        script='''set -eu
+mkdir -p -- "$(dirname -- "$2")"
+set -C
+cat -- "$1" > "$2"
+'''
+        aurora_exec(['sh','-c',script,'ltfs-write',src,dst])
+        update(bytes_done=base_bytes+file_size)
+        return
     token=uuid.uuid4().hex
     progress='/tmp/ltfs-write-progress-'+token
     finished=threading.Event()
@@ -773,7 +801,14 @@ def write_worker(plan):
             update(verified=i+1)
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',state='completed',file='',message=f'Write committed and SHA-256 verified: {len(wrote)} files')
     except Exception as e:
-        update(stage='failed',state='failed',verification_error=str(e),message='Write stopped: '+str(e))
+        # Capture RW worker errors BEFORE stop_aurora() removes the container.
+        failed_logs=None
+        try:
+            worker=aurora()
+            if worker:failed_logs=save_aurora_logs(worker,'write-failed')
+        except Exception:pass
+        update(stage='failed',state='failed',verification_error=str(e),message='Write stopped: '+str(e),
+               aurora_failure_log=failed_logs or '')
         # Do not automatically retry writes or pretend an incomplete commit succeeded.
         # If mounted RW, attempt clean commit, then RO remount for inspection.
         try:
