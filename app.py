@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.4'
+VERSION='1.6.5'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -759,45 +759,69 @@ producer=''
         t.join(timeout=4)
 
 def verify_tape_batch(wrote,offset=0,total=None):
-    """Hash committed files in one Aurora invocation, preserving write order.
+    """Verify committed tape files sequentially, reporting each finished SHA-256.
 
-    A single process avoids a Docker exec round-trip for every file.
-    Each file is opened once after the read-only remount; no tape read occurs
-    during the write phase. Do not trust uncommitted source hashes alone.
+    Stream sha256sum's NUL-delimited results so the GUI advances after each
+    verified file, rather than waiting for the entire tape verification pass.
+    Each file is read only once after the read-only remount.
     """
     if not wrote:return
     if total is None:total=len(wrote)
-    # GNU sha256sum --zero outputs NUL-delimited records, safe for filenames.
-    # A shell script builds the positional parameters without interpolating paths.
-    script='''set -eu
-exec sha256sum --zero -- "$@"
-'''
-    paths=['/ltfs/'+target for _,_,_,target,_ in wrote]
-    if len(paths)>64:
-        for offset in range(0,len(wrote),64):
-            verify_tape_batch(wrote[offset:offset+64],offset,len(wrote))
+    if len(wrote)>64:
+        for start in range(0,len(wrote),64):
+            verify_tape_batch(wrote[start:start+64],offset+start,total)
         return
     c=aurora()
-    if not c or c.status!='running':raise RuntimeError('Aurora container stopped during verification')
-    result=c.exec_run(['sh','-c',script,'verify-tape',*paths],demux=False)
-    if result.exit_code!=0:
-        raise RuntimeError('Tape verification command failed: '+(result.output or b'').decode('utf-8','replace')[-600:])
-    records=(result.output or b'').split(b'\0')
-    if not records or records[-1]!=b'':raise RuntimeError('Incomplete tape verification output (expected NUL-terminated SHA-256 records)')
-    records=records[:-1]
-    if len(records)!=len(wrote):raise RuntimeError('Unexpected number of verified tape files')
-    for i,(record,(_,p,size,target,expected)) in enumerate(zip(records,wrote)):
-        if len(record)<66 or record[64:66]!=b'  ':
-            raise RuntimeError('Invalid tape SHA-256 record: '+target)
-        digest=record[:64].decode('ascii')
-        if not re.fullmatch('[0-9a-f]{64}',digest):
-            raise RuntimeError('Invalid tape SHA-256 digest: '+target)
-        if digest!=expected:
-            raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
-        if p.stat().st_size!=size:
-            raise RuntimeError('Source size changed during verification: '+target)
-        update(verified=offset+i+1,file=target,
-               message=f'Verified committed tape file {offset+i+1}/{total}')
+    if not c or c.status!='running':
+        raise RuntimeError('Aurora container stopped during verification')
+    paths=['/ltfs/'+target for _,_,_,target,_ in wrote]
+    script='set -eu; exec sha256sum --zero -- "$@"'
+    execution=c.client.api.exec_create(c.id,
+        ['sh','-c',script,'verify-tape',*paths],stdout=True,stderr=True,tty=False)
+    exec_id=execution['Id']
+    stream=c.client.api.exec_start(exec_id,stream=True,demux=True)
+    pending=b''
+    stderr_tail=b''
+    count=0
+    try:
+        update(verify_current=offset+1,verify_total=total,
+               message=f'Verifying committed tape file {offset+1}/{total}: {wrote[0][3]}')
+        for stdout,stderr in stream:
+            if stderr:
+                stderr_tail=(stderr_tail+stderr)[-1200:]
+            if not stdout:continue
+            pending+=stdout
+            while b'\\0' in pending:
+                record,pending=pending.split(b'\\0',1)
+                if count>=len(wrote):
+                    raise RuntimeError('Unexpected extra tape SHA-256 result')
+                _,p,size,target,expected=wrote[count]
+                if len(record)<66 or record[64:66]!=b'  ':
+                    raise RuntimeError('Invalid tape SHA-256 record: '+target)
+                digest=record[:64].decode('ascii')
+                if not re.fullmatch('[0-9a-f]{64}',digest):
+                    raise RuntimeError('Invalid tape SHA-256 digest: '+target)
+                if digest!=expected:
+                    raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
+                if p.stat().st_size!=size:
+                    raise RuntimeError('Source size changed during verification: '+target)
+                count+=1
+                fields={'verified':offset+count,'file':target,
+                        'message':f'Verified committed tape file {offset+count}/{total}: {target}'}
+                if count<len(wrote):
+                    fields['verify_current']=offset+count+1
+                    fields['message']+=f' — next: {wrote[count][3]}'
+                update(**fields)
+        status=c.client.api.exec_inspect(exec_id)
+        if status.get('ExitCode')!=0:
+            raise RuntimeError('Tape verification command failed: '+
+                               stderr_tail.decode('utf-8','replace')[-600:])
+        if pending or count!=len(wrote):
+            raise RuntimeError('Incomplete tape verification output: '+
+                               str(count)+'/'+str(len(wrote))+' files')
+    finally:
+        close=getattr(stream,'close',None)
+        if close:close()
 
 def write_worker(plan):
     wrote=[]
