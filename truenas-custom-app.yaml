@@ -1,22 +1,22 @@
-# LTFS Tape Manager v1.5.0.0 — TrueNAS SCALE Custom App YAML
+# LTFS Tape Manager v1.6.0 — TrueNAS SCALE Custom App YAML
 # In TrueNAS: Apps > Discover Apps > Install via YAML.
 # Edit the four /mnt/Pool1 paths and tape device paths to match your system.
 # Before installing, create the persistent state directory shown below
-# (/mnt/Pool1/LTFS-Manager/simple-state-1.5), using your dataset's ACL policy.
+# (/mnt/Pool1/LTFS-Manager/simple-state-1.6), using your dataset's ACL policy.
 # Docker must not auto-create it on TrueNAS datasets with restrictive ACLs.
-# Install as a separate TrueNAS Custom App named ltfs-tape-manager-1-5.
-# Unmount and stop v1.2.0.5 before starting v1.5.0.0; never operate
+# Install as a separate TrueNAS Custom App named ltfs-tape-manager-1-6.
+# Unmount and stop other manager versions before starting v1.6.0; never operate
 # both versions against the same physical tape drive simultaneously.
 # The manager creates/removes the Aurora LTFS worker on demand;
 # do NOT add a second permanent Aurora service.
 services:
-  ltfs-tape-manager-1-5:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.5.0.0
-    container_name: ltfs-manager-1-5
+  ltfs-tape-manager-1-6:
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0
+    container_name: ltfs-manager-1-6
     restart: unless-stopped
     privileged: true
     ports:
-      - "8082:8080"
+      - "8083:8080"
     environment:
       HOST_TAPE_PATH: /mnt/Pool1/LTFS
       HOST_WRITE_PATH: /mnt/Pool1/LTFS-WRITE
@@ -24,8 +24,8 @@ services:
       SG_DEVICE: /dev/sg2
       NST_DEVICE: /dev/nst0
       AURORA_IMAGE: ghcr.io/auroratape/aurora-ltfs:1.5.0
-      LTFS_WORKER_NAME: aurora-ltfs-1-5
-      LTFS_MANAGER_NAME: ltfs-manager-1-5
+      LTFS_WORKER_NAME: aurora-ltfs-1-6
+      LTFS_MANAGER_NAME: ltfs-manager-1-6
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - type: bind
@@ -43,7 +43,7 @@ services:
       # Persistent state: create this directory before installing.
       # TrueNAS ACLs may reject Docker's automatic chmod on new directories.
       - type: bind
-        source: /mnt/Pool1/LTFS-Manager/simple-state-1.5
+        source: /mnt/Pool1/LTFS-Manager/simple-state-1.6
         target: /state-simple
         bind:
           create_host_path: false
