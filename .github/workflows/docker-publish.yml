@@ -2,7 +2,7 @@ name: Publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, '1.5']
     paths:
       - 'app.py'
       - 'static/**'
@@ -44,10 +44,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/geraldjust/ltfs-tape-manager:1.2.0.5
-            ghcr.io/geraldjust/ltfs-tape-manager:latest
+            ghcr.io/geraldjust/ltfs-tape-manager:1.5.0.0
+            ghcr.io/geraldjust/ltfs-tape-manager:1.5-dev
           labels: |
             org.opencontainers.image.source=https://github.com/geraldjust/ltfs-tape-manager
-            org.opencontainers.image.version=1.2.0.5
+            org.opencontainers.image.version=1.5.0.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
