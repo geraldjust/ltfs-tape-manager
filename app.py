@@ -717,22 +717,38 @@ def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
     # physical tape persistence. Commit and SHA-256 remain the authoritative checks.
     script='''set -eu
 mkdir -p -- "$(dirname -- "$2")"
+fifo="$4"
+mkfifo -- "$fifo"
+producer=''
+consumer=''
+cleanup() {
+  [ -z "$producer" ] || kill "$producer" 2>/dev/null || true
+  [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
+  rm -f -- "$3" "$fifo"
+}
+trap cleanup EXIT
+# A FIFO provides bounded kernel pipe buffering and concurrent source read-ahead.
+# It cannot grow without limit and never stages entire files on disk.
+cat -- "$1" > "$fifo" &
+producer=$!
 set -C
-cat -- "$1" > "$2" &
-pid=$!
-trap 'rm -f -- "$3"' EXIT
-while kill -0 "$pid" 2>/dev/null; do
-  if [ -r "/proc/$pid/io" ]; then
-    awk '/^rchar:/ {print $2}' "/proc/$pid/io" >| "$3" 2>/dev/null || true
+cat < "$fifo" > "$2" &
+consumer=$!
+while kill -0 "$consumer" 2>/dev/null; do
+  if [ -r "/proc/$consumer/io" ]; then
+    awk '/^rchar:/ {print $2}' "/proc/$consumer/io" >| "$3" 2>/dev/null || true
   fi
   sleep 2
 done
-wait "$pid"
+wait "$consumer"
+consumer=''
+wait "$producer"
+producer=''
 '''
     t=threading.Thread(target=monitor,daemon=True)
     t.start()
     try:
-        aurora_exec(['sh','-c',script,'ltfs-write',src,dst,progress])
+        aurora_exec(['sh','-c',script,'ltfs-write',src,dst,progress,'/tmp/ltfs-write-fifo-'+token])
     finally:
         finished.set()
         t.join(timeout=4)
