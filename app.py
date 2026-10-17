@@ -721,10 +721,11 @@ fifo="$4"
 mkfifo -- "$fifo"
 producer=''
 consumer=''
+progress_file="$3"
 cleanup() {
   [ -z "$producer" ] || kill "$producer" 2>/dev/null || true
   [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
-  rm -f -- "$3" "$fifo"
+  rm -f -- "$progress_file" "$fifo"
 }
 trap cleanup EXIT
 # A FIFO provides bounded kernel pipe buffering and concurrent source read-ahead.
