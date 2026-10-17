@@ -1,16 +1,16 @@
-# LTFS Tape Manager v1.6.0 — TrueNAS SCALE Custom App YAML
+# LTFS Tape Manager v1.6.1 — TrueNAS SCALE Custom App YAML
 # In TrueNAS: Apps > Discover Apps > Install via YAML.
 # Edit the four /mnt/Pool1 paths and tape device paths to match your system.
 # The init service creates simple-state-1.6 under the existing LTFS-Manager dataset.
 # It does not chmod or chown NFSv4 ACL-protected paths.
 # Install as a separate TrueNAS Custom App named ltfs-tape-manager-1-6.
-# Unmount and stop other manager versions before starting v1.6.0; never operate
+# Unmount and stop other manager versions before starting v1.6.1; never operate
 # both versions against the same physical tape drive simultaneously.
 # The manager creates/removes the Aurora LTFS worker on demand;
 # do NOT add a second permanent Aurora service.
 services:
   init-state-1-6:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.1
     restart: "no"
     user: "0:0"
     entrypoint: ["python", "-c"]
@@ -25,7 +25,7 @@ services:
     depends_on:
       init-state-1-6:
         condition: service_completed_successfully
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.1
     container_name: ltfs-manager-1-6
     restart: unless-stopped
     privileged: true
