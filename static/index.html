@@ -21,6 +21,7 @@ function fmtSpeed(bytesPerSecond){
  if(bytesPerSecond<1024*1024)return (bytesPerSecond/1024).toFixed(1)+' KB/s';
  return (bytesPerSecond/(1024*1024)).toFixed(1)+' MB/s';
 }
+function durationLabel(n){n=Math.max(0,Math.round(n));return Math.floor(n/3600)+'h '+Math.floor(n%3600/60)+'m '+n%60+'s';}
 function completionSummary(j,kind){
  const verified=j.verified||0,files=j.total||0,bytes=j.bytes_done||0;
  const ts=Date.parse(j.transfer_started_at||''),te=Date.parse(j.transfer_finished_at||'');
@@ -38,7 +39,6 @@ function etaLabel(j){
   const start=Date.parse(j.started_at||''),end=Date.parse(j.finished_at||j.updated_at||'');
   const ts=Date.parse(j.transfer_started_at||''),te=Date.parse(j.transfer_finished_at||'');
   const duration=(end-start)/1000,transferDuration=(te-ts)/1000;
-  const durationLabel=n=>{n=Math.max(0,Math.round(n));return Math.floor(n/3600)+'h '+Math.floor(n%3600/60)+'m '+n%60+'s';};
   const details=['Completed'];
   if(Number.isFinite(duration)&&duration>=0)details.push('Total elapsed: '+durationLabel(duration));
   if(Number.isFinite(transferDuration)&&transferDuration>0&&(j.bytes_done||0)>0)
