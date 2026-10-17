@@ -740,7 +740,11 @@ while kill -0 "$consumer" 2>/dev/null; do
   fi
   sleep 2
 done
-wait "$consumer"
+if ! wait "$consumer"; then
+  kill "$producer" 2>/dev/null || true
+  wait "$producer" 2>/dev/null || true
+  exit 1
+fi
 consumer=''
 wait "$producer"
 producer=''
