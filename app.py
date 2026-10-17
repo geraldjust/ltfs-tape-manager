@@ -740,42 +740,55 @@ wait "$pid"
 def write_worker(plan):
     wrote=[]
     try:
-        # Important: GUI /tape mount namespace can become stale across remounts.
-        # All tape I/O is executed INSIDE the Aurora container, never through GUI /tape.
+        # Hash sources before mounting RW so tape reads never interrupt writing.
+        # Recheck each source's size/mtime before and after transfer.
+        update(stage='preparing',message='Calculating source SHA-256 before sequential tape write')
+        expected_hashes={}
+        for i,(rel,p,size,target,mtime) in enumerate(plan):
+            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+                raise RuntimeError('Source file changed before hashing: '+rel)
+            expected_hashes[rel]=hash_file(p)
+            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+                raise RuntimeError('Source file changed during hashing: '+rel)
+            update(message=f'Prepared source {i+1}/{len(plan)}: '+rel)
+        # All tape I/O occurs inside Aurora's mount namespace.
         update(stage='mounting',message='Switching LTFS to read-write; do not interrupt')
         mount_aurora(True,allow_stale=True)
         if mode()!='rw':raise RuntimeError('Read-write mount not confirmed')
         for i,(rel,p,size,target,mtime) in enumerate(plan):
-            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:raise RuntimeError('Source file changed before writing: '+rel)
-            # All paths originate under /source, and target is an LTFS-root-relative path.
+            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+                raise RuntimeError('Source file changed before writing: '+rel)
             src='/source/'+rel;dst='/ltfs/'+target
-            update(transfer_started_at=job.get('transfer_started_at') or datetime.now(timezone.utc).isoformat(),stage='writing',file=target,message=f'Writing {i+1}/{len(plan)}: '+target)
-            # Exclusive creation is retained; live progress is informational.
+            update(transfer_started_at=job.get('transfer_started_at') or datetime.now(timezone.utc).isoformat(),
+                   stage='writing',file=target,message=f'Sequential write {i+1}/{len(plan)}: '+target)
             base_bytes=sum(x[2] for x in wrote)
             copy_to_tape_with_progress(src,dst,base_bytes,size)
-            # Compare tape copy against source before index commit, fail on mismatch.
-            expected=hash_file(p)
-            actual=aurora_exec(['sha256sum','--',dst]).split()[0]
-            if expected!=actual:raise RuntimeError('SHA-256 mismatch before commit: '+target)
-            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:raise RuntimeError('Source changed while writing: '+rel)
-            wrote.append((rel,p,size,target,expected))
+            # Do not read back the tape here: that forces backwards tape motion.
+            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+                raise RuntimeError('Source changed while writing: '+rel)
+            wrote.append((rel,p,size,target,expected_hashes[rel]))
             update(done=i+1,bytes_done=sum(x[2] for x in wrote))
-        update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),stage='committing',message='Committing LTFS index; do not interrupt')
-        stop_aurora() # Clean stop is required for sync_type=unmount.
+        update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),
+               stage='committing',message='Committing LTFS index; do not interrupt')
+        stop_aurora()
         update(stage='remounting',message='Mounting tape read-only for independent verification')
         mount_aurora(False,allow_stale=True)
         if mode()!='ro':raise RuntimeError('Read-only remount not confirmed')
+        # One verification pass after commit; no tape readbacks during the write.
         for i,(rel,p,size,target,expected) in enumerate(wrote):
-            update(stage='verifying',file=target,message=f'Verifying committed tape file {i+1}/{len(wrote)}')
+            update(stage='verifying',file=target,
+                   message=f'Verifying committed tape file {i+1}/{len(wrote)}')
+            if p.stat().st_size!=size:raise RuntimeError('Source size changed: '+rel)
             if hash_file(p)!=expected:raise RuntimeError('Source changed during verification: '+rel)
             actual=aurora_exec(['sha256sum','--','/ltfs/'+target]).split()[0]
             if actual!=expected:raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
             update(verified=i+1)
-        update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',state='completed',file='',message=f'Write committed and SHA-256 verified: {len(wrote)} files')
+        update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
+               state='completed',file='',
+               message=f'Write committed and SHA-256 verified: {len(wrote)} files')
     except Exception as e:
-        update(stage='failed',state='failed',verification_error=str(e),message='Write stopped: '+str(e))
-        # Do not automatically retry writes or pretend an incomplete commit succeeded.
-        # If mounted RW, attempt clean commit, then RO remount for inspection.
+        update(stage='failed',state='failed',verification_error=str(e),
+               message='Write stopped: '+str(e))
         try:
             if mode()=='rw':
                 update(message='Write failed; attempting safe LTFS index commit (do not eject)')
@@ -786,7 +799,6 @@ def write_worker(plan):
             update(message='Write failed and safe recovery failed. DO NOT EJECT. '+str(e)+'; recovery: '+str(recovery))
     finally:
         lock.release()
-        # GUI mount namespace may be stale. Restart only after final operation state is saved.
         if mode()=='ro':restart_gui_later()
 
 @app.post('/api/read-preview')
