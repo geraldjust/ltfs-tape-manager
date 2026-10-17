@@ -737,6 +737,43 @@ wait "$pid"
         finished.set()
         t.join(timeout=4)
 
+def verify_tape_batch(wrote):
+    """Hash committed files in one Aurora invocation, preserving write order.
+
+    A single process avoids a Docker exec round-trip for every file.
+    Each file is opened once after the read-only remount; no tape read occurs
+    during the write phase. Do not trust uncommitted source hashes alone.
+    """
+    if not wrote:return
+    # GNU sha256sum --zero outputs NUL-delimited records, safe for filenames.
+    # A shell script builds the positional parameters without interpolating paths.
+    script='''set -eu
+shift
+exec sha256sum --zero -- "$@"
+'''
+    paths=['/ltfs/'+target for _,_,_,target,_ in wrote]
+    c=aurora()
+    if not c or c.status!='running':raise RuntimeError('Aurora container stopped during verification')
+    result=c.exec_run(['sh','-c',script,'verify-tape',*paths],demux=False)
+    if result.exit_code!=0:
+        raise RuntimeError('Tape verification command failed: '+(result.output or b'').decode('utf-8','replace')[-600:])
+    records=(result.output or b'').split(b'\\0')
+    if records[-1]!=b'':raise RuntimeError('Incomplete tape verification output')
+    records=records[:-1]
+    if len(records)!=len(wrote):raise RuntimeError('Unexpected number of verified tape files')
+    for i,(record,(_,p,size,target,expected)) in enumerate(zip(records,wrote)):
+        if len(record)<66 or record[64:66]!=b'  ':
+            raise RuntimeError('Invalid tape SHA-256 record: '+target)
+        digest=record[:64].decode('ascii')
+        if not re.fullmatch('[0-9a-f]{64}',digest):
+            raise RuntimeError('Invalid tape SHA-256 digest: '+target)
+        if digest!=expected:
+            raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
+        if p.stat().st_size!=size or hash_file(p)!=expected:
+            raise RuntimeError('Source changed during verification: '+target)
+        update(verified=i+1,file=target,
+               message=f'Verified committed tape file {i+1}/{len(wrote)}')
+
 def write_worker(plan):
     wrote=[]
     try:
@@ -774,15 +811,8 @@ def write_worker(plan):
         update(stage='remounting',message='Mounting tape read-only for independent verification')
         mount_aurora(False,allow_stale=True)
         if mode()!='ro':raise RuntimeError('Read-only remount not confirmed')
-        # One verification pass after commit; no tape readbacks during the write.
-        for i,(rel,p,size,target,expected) in enumerate(wrote):
-            update(stage='verifying',file=target,
-                   message=f'Verifying committed tape file {i+1}/{len(wrote)}')
-            if p.stat().st_size!=size:raise RuntimeError('Source size changed: '+rel)
-            if hash_file(p)!=expected:raise RuntimeError('Source changed during verification: '+rel)
-            actual=aurora_exec(['sha256sum','--','/ltfs/'+target]).split()[0]
-            if actual!=expected:raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
-            update(verified=i+1)
+        update(stage='verifying',message='Sequential SHA-256 verification of committed tape files')
+        verify_tape_batch(wrote)
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
                state='completed',file='',
                message=f'Write committed and SHA-256 verified: {len(wrote)} files')
@@ -864,9 +894,9 @@ def read_worker(plan,out):
                 update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),stage='verifying',message='Verifying restored file '+str(index+1)+'/'+str(len(plan)))
                 if hash_file(dst)!=source_hash.hexdigest():
                     raise RuntimeError('SHA-256 destination verification failed: '+rel)
-                # Read tape source again to independently verify restored bytes.
-                if hash_file(src)!=source_hash.hexdigest():
-                    raise RuntimeError('SHA-256 tape re-read verification failed: '+rel)
+                # The SHA-256 digest was computed while streaming tape to disk.
+                # Re-reading each tape file here forces unnecessary backhitching.
+                # Destination is independently hashed from disk above.
             except Exception:
                 # Preserve partial file for investigation; do not silently retry.
                 raise
