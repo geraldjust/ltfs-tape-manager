@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.5.0.0'
+VERSION='1.6.0'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -782,8 +782,8 @@ exec sha256sum --zero -- "$@"
     result=c.exec_run(['sh','-c',script,'verify-tape',*paths],demux=False)
     if result.exit_code!=0:
         raise RuntimeError('Tape verification command failed: '+(result.output or b'').decode('utf-8','replace')[-600:])
-    records=(result.output or b'').split(b'\\0')
-    if records[-1]!=b'':raise RuntimeError('Incomplete tape verification output')
+    records=(result.output or b'').split(b'\0')
+    if not records or records[-1]!=b'':raise RuntimeError('Incomplete tape verification output (expected NUL-terminated SHA-256 records)')
     records=records[:-1]
     if len(records)!=len(wrote):raise RuntimeError('Unexpected number of verified tape files')
     for i,(record,(_,p,size,target,expected)) in enumerate(zip(records,wrote)):
@@ -794,8 +794,8 @@ exec sha256sum --zero -- "$@"
             raise RuntimeError('Invalid tape SHA-256 digest: '+target)
         if digest!=expected:
             raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
-        if p.stat().st_size!=size or hash_file(p)!=expected:
-            raise RuntimeError('Source changed during verification: '+target)
+        if p.stat().st_size!=size:
+            raise RuntimeError('Source size changed during verification: '+target)
         update(verified=offset+i+1,file=target,
                message=f'Verified committed tape file {offset+i+1}/{total}')
 
