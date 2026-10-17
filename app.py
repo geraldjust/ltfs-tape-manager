@@ -737,7 +737,7 @@ wait "$pid"
         finished.set()
         t.join(timeout=4)
 
-def verify_tape_batch(wrote):
+def verify_tape_batch(wrote,offset=0,total=None):
     """Hash committed files in one Aurora invocation, preserving write order.
 
     A single process avoids a Docker exec round-trip for every file.
@@ -745,13 +745,17 @@ def verify_tape_batch(wrote):
     during the write phase. Do not trust uncommitted source hashes alone.
     """
     if not wrote:return
+    if total is None:total=len(wrote)
     # GNU sha256sum --zero outputs NUL-delimited records, safe for filenames.
     # A shell script builds the positional parameters without interpolating paths.
     script='''set -eu
-shift
 exec sha256sum --zero -- "$@"
 '''
     paths=['/ltfs/'+target for _,_,_,target,_ in wrote]
+    if len(paths)>64:
+        for offset in range(0,len(wrote),64):
+            verify_tape_batch(wrote[offset:offset+64],offset,len(wrote))
+        return
     c=aurora()
     if not c or c.status!='running':raise RuntimeError('Aurora container stopped during verification')
     result=c.exec_run(['sh','-c',script,'verify-tape',*paths],demux=False)
@@ -771,8 +775,8 @@ exec sha256sum --zero -- "$@"
             raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
         if p.stat().st_size!=size or hash_file(p)!=expected:
             raise RuntimeError('Source changed during verification: '+target)
-        update(verified=i+1,file=target,
-               message=f'Verified committed tape file {i+1}/{len(wrote)}')
+        update(verified=offset+i+1,file=target,
+               message=f'Verified committed tape file {offset+i+1}/{total}')
 
 def write_worker(plan):
     wrote=[]
