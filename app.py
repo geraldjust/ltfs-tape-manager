@@ -14,15 +14,15 @@ REFRESH_CACHE={'data':None,'time':0}
 HEALTH_CACHE={'data':None,'time':0}
 RESTART_PENDING=False
 job={'state':'idle','message':'Ready','done':0,'total':0,'file':'','bytes_done':0,'bytes_total':0}
-IMAGE=os.environ.get('AURORA_IMAGE','ghcr.io/auroratape/aurora-ltfs:1.0.0')
+IMAGE=os.environ.get('AURORA_IMAGE','ghcr.io/auroratape/aurora-ltfs:1.5.0')
 HOST_TAPE=os.environ.get('HOST_TAPE_PATH','/mnt/example/LTFS')
 HOST_SOURCE=os.environ.get('HOST_WRITE_PATH','/mnt/example/LTFS-WRITE')
 HOST_DEST=os.environ.get('HOST_READ_PATH','/mnt/example/LTFS-READ')
 SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
-WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs')
-MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-simple-manager')
-VERSION='1.2.0.5'
+WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
+MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
+VERSION='1.5.0.0'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -358,7 +358,7 @@ def restart_gui_later():
     # the GUI may retain a stale /tape entry despite host unmount success.
     def restart():
         time.sleep(2)
-        try:client.containers.get('ltfs-simple-manager').restart(timeout=10)
+        try:client.containers.get(MANAGER_NAME).restart(timeout=10)
         except Exception as e:print('Automatic GUI restart failed:',e,flush=True)
     threading.Thread(target=restart,daemon=True).start()
 
