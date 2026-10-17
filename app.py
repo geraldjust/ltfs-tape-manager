@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.1'
+VERSION='1.6.2'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -685,7 +685,7 @@ def write_start():
         if total+1024**3>free:raise RuntimeError('Insufficient reported tape free space including 1 GiB safety margin')
         # Freeze size and mtime: detect source changes before copying each file.
         frozen=[(rel,p,size,target,p.stat().st_mtime_ns) for rel,p,size,target in effective]
-        update(state='running',action='write',stage='preparing',file='',done=0,total=len(frozen),verified=0,
+        update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
                bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
         threading.Thread(target=write_worker,args=(frozen,),daemon=True).start()
@@ -888,7 +888,7 @@ def read_start():
         if out.exists():raise RuntimeError('Restore destination already exists')
         total=sum(size for _,_,size in plan)
         require_destination_space(total,'preflight')
-        update(state='running',action='read',stage='copying',verified=0,mismatches=0,verification_error='',message='Starting read-only restore',file='',done=0,total=len(plan),bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,started_at=datetime.now(timezone.utc).isoformat(),destination=str(out))
+        update(state='running',action='read',selection_mode='all' if data.get('all') is True else 'selected',stage='copying',verified=0,mismatches=0,verification_error='',message='Starting read-only restore',file='',done=0,total=len(plan),bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,started_at=datetime.now(timezone.utc).isoformat(),destination=str(out))
         threading.Thread(target=read_worker,args=(plan,out),daemon=True).start()
         return jsonify(ok=True,message='Read-only restore started',destination=str(out),files=len(plan),bytes=total),202
     except Exception as e:
