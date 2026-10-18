@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.6'
+VERSION='1.6.7'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -717,6 +717,7 @@ mkdir -p -- "$(dirname -- "$2")"
 data_fifo="$4"
 hash_fifo="$5"
 hash_result="$6"
+progress_file="$3"
 mkfifo -- "$data_fifo" "$hash_fifo"
 producer=''
 consumer=''
@@ -725,7 +726,7 @@ cleanup() {
   [ -z "$producer" ] || kill "$producer" 2>/dev/null || true
   [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
   [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
-  rm -f -- "$3" "$data_fifo" "$hash_fifo" "$hash_result"
+  rm -f -- "$progress_file" "$data_fifo" "$hash_fifo" "$hash_result"
 }
 trap cleanup EXIT
 sha256sum < "$hash_fifo" > "$hash_result" &
