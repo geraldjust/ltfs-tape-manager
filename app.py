@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.5'
+VERSION='1.6.6'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -694,10 +694,10 @@ def write_start():
         lock.release();return jsonify(ok=False,error=str(e)),409
 
 def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
-    """Copy with exclusive creation, reporting source bytes consumed by cat.
+    """Stream source once through tee to LTFS and SHA-256 concurrently.
 
-    Progress is informational; only a successful copy plus SHA-256 counts as written.
-    No tape-side metadata queries are performed during streaming.
+    The hash is computed from the source stream delivered to the tape writer.
+    Tape-side verification still happens independently after the RO remount.
     """
     token=uuid.uuid4().hex
     progress='/tmp/ltfs-write-progress-'+token
@@ -712,28 +712,29 @@ def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
                 update(bytes_done=base_bytes+current)
             except (ValueError,RuntimeError,IndexError):
                 pass
-    # Preserve exclusive create (set -C), original cat transfer and error propagation.
-    # Linux /proc/PID/io rchar counts bytes consumed from the source; it may lead
-    # physical tape persistence. Commit and SHA-256 remain the authoritative checks.
     script='''set -eu
 mkdir -p -- "$(dirname -- "$2")"
-fifo="$4"
-mkfifo -- "$fifo"
+data_fifo="$4"
+hash_fifo="$5"
+hash_result="$6"
+mkfifo -- "$data_fifo" "$hash_fifo"
 producer=''
 consumer=''
-progress_file="$3"
+hasher=''
 cleanup() {
   [ -z "$producer" ] || kill "$producer" 2>/dev/null || true
   [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
-  rm -f -- "$progress_file" "$fifo"
+  [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
+  rm -f -- "$3" "$data_fifo" "$hash_fifo" "$hash_result"
 }
 trap cleanup EXIT
-# A FIFO provides bounded kernel pipe buffering and concurrent source read-ahead.
-# It cannot grow without limit and never stages entire files on disk.
-cat -- "$1" > "$fifo" &
+sha256sum < "$hash_fifo" > "$hash_result" &
+hasher=$!
+# tee reads the source only once; one output feeds SHA-256, the other LTFS.
+tee -- "$hash_fifo" < "$1" > "$data_fifo" &
 producer=$!
 set -C
-cat < "$fifo" > "$2" &
+cat < "$data_fifo" > "$2" &
 consumer=$!
 while kill -0 "$consumer" 2>/dev/null; do
   if [ -r "/proc/$consumer/io" ]; then
@@ -742,18 +743,30 @@ while kill -0 "$consumer" 2>/dev/null; do
   sleep 2
 done
 if ! wait "$consumer"; then
-  kill "$producer" 2>/dev/null || true
-  wait "$producer" 2>/dev/null || true
   exit 1
 fi
 consumer=''
 wait "$producer"
 producer=''
+wait "$hasher"
+hasher=''
+digest="$(cut -d ' ' -f 1 < "$hash_result")"
+case "$digest" in
+  *[!0-9a-f]*|'') echo "Invalid source SHA-256" >&2; exit 1 ;;
+esac
+[ "${#digest}" -eq 64 ] || { echo "Invalid source SHA-256 length" >&2; exit 1; }
+printf '%s\\n' "$digest"
 '''
     t=threading.Thread(target=monitor,daemon=True)
     t.start()
     try:
-        aurora_exec(['sh','-c',script,'ltfs-write',src,dst,progress,'/tmp/ltfs-write-fifo-'+token])
+        digest=aurora_exec(['sh','-c',script,'ltfs-write',src,dst,progress,
+                            '/tmp/ltfs-write-data-'+token,
+                            '/tmp/ltfs-write-hash-'+token,
+                            '/tmp/ltfs-write-digest-'+token]).strip()
+        if not re.fullmatch('[0-9a-f]{64}',digest):
+            raise RuntimeError('Source streaming SHA-256 result missing or invalid')
+        return digest
     finally:
         finished.set()
         t.join(timeout=4)
@@ -826,17 +839,9 @@ def verify_tape_batch(wrote,offset=0,total=None):
 def write_worker(plan):
     wrote=[]
     try:
-        # Hash sources before mounting RW so tape reads never interrupt writing.
-        # Recheck each source's size/mtime before and after transfer.
-        update(stage='preparing',message='Calculating source SHA-256 before sequential tape write')
-        expected_hashes={}
-        for i,(rel,p,size,target,mtime) in enumerate(plan):
-            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
-                raise RuntimeError('Source file changed before hashing: '+rel)
-            expected_hashes[rel]=hash_file(p)
-            if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
-                raise RuntimeError('Source file changed during hashing: '+rel)
-            update(message=f'Prepared source {i+1}/{len(plan)}: '+rel)
+        # The plan is metadata-only; SHA-256 is computed while each file streams
+        # to tape, avoiding an extra full read of mechanical source disks.
+        update(stage='preparing',message='Source scan complete; SHA-256 will be calculated during writing')
         # All tape I/O occurs inside Aurora's mount namespace.
         update(stage='mounting',message='Switching LTFS to read-write; do not interrupt')
         mount_aurora(True,allow_stale=True)
@@ -848,11 +853,11 @@ def write_worker(plan):
             update(transfer_started_at=job.get('transfer_started_at') or datetime.now(timezone.utc).isoformat(),
                    stage='writing',file=target,message=f'Sequential write {i+1}/{len(plan)}: '+target)
             base_bytes=sum(x[2] for x in wrote)
-            copy_to_tape_with_progress(src,dst,base_bytes,size)
+            streamed_hash=copy_to_tape_with_progress(src,dst,base_bytes,size)
             # Do not read back the tape here: that forces backwards tape motion.
             if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
                 raise RuntimeError('Source changed while writing: '+rel)
-            wrote.append((rel,p,size,target,expected_hashes[rel]))
+            wrote.append((rel,p,size,target,streamed_hash))
             update(done=i+1,bytes_done=sum(x[2] for x in wrote))
         update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),
                stage='committing',message='Committing LTFS index; do not interrupt')
