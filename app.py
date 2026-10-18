@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.7'
+VERSION='1.6.8'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -805,8 +805,8 @@ def verify_tape_batch(wrote,offset=0,total=None):
                 stderr_tail=(stderr_tail+stderr)[-1200:]
             if not stdout:continue
             pending+=stdout
-            while b'\\0' in pending:
-                record,pending=pending.split(b'\\0',1)
+            while b'\0' in pending:
+                record,pending=pending.split(b'\0',1)
                 if count>=len(wrote):
                     raise RuntimeError('Unexpected extra tape SHA-256 result')
                 _,p,size,target,expected=wrote[count]
