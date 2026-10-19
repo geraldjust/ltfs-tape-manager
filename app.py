@@ -618,12 +618,25 @@ def read_plan(paths):
         if p.is_symlink() or not p.exists():raise ValueError('Selected item missing or symlink: '+rel)
         selected.append(p)
     files={}
+    def add_archive(archive):
+        manifest=load_manifest(archive)
+        archive_rel=str(archive.relative_to(TAPE))
+        for member in manifest['members']:
+            files[archive_rel+'::'+member['name']]=(archive,member['size'])
     for p in selected:
         if isinstance(p,tuple):
             files[p[0]]=(p[1],p[2]);continue
-        if p.is_file():files[str(p.relative_to(TAPE))]=(p,p.stat().st_size)
+        if p.is_file():
+            if p.name.endswith('.tar') and p.with_name(p.name+'.manifest.json').is_file():
+                add_archive(p)
+            elif not p.name.endswith('.tar.manifest.json'):
+                files[str(p.relative_to(TAPE))]=(p,p.stat().st_size)
         elif p.is_dir():
-            for f,_,size in files_under(p):files[str(f.relative_to(TAPE))]=(f,size)
+            for f,_,size in files_under(p):
+                if f.name.endswith('.tar') and f.with_name(f.name+'.manifest.json').is_file():
+                    add_archive(f)
+                elif not f.name.endswith('.tar.manifest.json'):
+                    files[str(f.relative_to(TAPE))]=(f,size)
         else:raise ValueError('Unsupported tape item')
     return [(rel,*files[rel]) for rel in sorted(files)]
 
