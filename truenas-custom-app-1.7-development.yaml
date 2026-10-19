@@ -1,0 +1,61 @@
+# LTFS Tape Manager v1.7.0 DEVELOPMENT — NOT YET PUBLISHED
+# Main TrueNAS SCALE / MAIN_Pool
+# Do not install until the 1.7.0-dev image has been built and published.
+# Stop v1.6.9 and unmount its LTFS worker before operating this test app.
+services:
+  init-state-1-7:
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.0-dev
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["python", "-c"]
+    command:
+      - "import os; os.makedirs('/state-parent/simple-state-1.7', exist_ok=True)"
+    volumes:
+      - type: bind
+        source: /mnt/MAIN_Pool/LTFS/LTFS-Manager
+        target: /state-parent
+        bind:
+          create_host_path: false
+  ltfs-tape-manager-1-7:
+    depends_on:
+      init-state-1-7:
+        condition: service_completed_successfully
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.0-dev
+    container_name: ltfs-manager-1-7
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8084:8080"
+    environment:
+      HOST_TAPE_PATH: /mnt/MAIN_Pool/LTFS/LTFS
+      HOST_WRITE_PATH: /mnt/MAIN_Pool/LTFS/LTFS-WRITE
+      HOST_READ_PATH: /mnt/MAIN_Pool/LTFS/LTFS-READ
+      SG_DEVICE: /dev/sg6
+      NST_DEVICE: /dev/nst0
+      AURORA_IMAGE: ghcr.io/auroratape/aurora-ltfs:1.5.0
+      LTFS_WORKER_NAME: aurora-ltfs-1-7
+      LTFS_MANAGER_NAME: ltfs-manager-1-7
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: /mnt/MAIN_Pool/LTFS/LTFS
+        target: /tape
+        bind:
+          propagation: rshared
+      - type: bind
+        source: /mnt/MAIN_Pool/LTFS/LTFS-WRITE
+        target: /write-source
+        read_only: true
+      - type: bind
+        source: /mnt/MAIN_Pool/LTFS/LTFS-READ
+        target: /destination
+      - type: bind
+        source: /mnt/MAIN_Pool/LTFS/LTFS-Manager/simple-state-1.7
+        target: /state-simple
+        bind:
+          create_host_path: false
+    devices:
+      - /dev/sg6:/dev/sg6:rwm
+      - /dev/nst0:/dev/nst0:rwm
+    security_opt:
+      - apparmor:unconfined
