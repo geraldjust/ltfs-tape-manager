@@ -50,7 +50,7 @@ def plan_archives(files, threshold_mib=16, max_archive_gib=32):
     reserved = set(seen)
     for parent, members in sorted(groups.items()):
         batch = []
-        estimate = 1024
+        estimate = 10240
         index = 0
         def add_batch():
             nonlocal batch, estimate, index
@@ -69,7 +69,7 @@ def plan_archives(files, threshold_mib=16, max_archive_gib=32):
             estimate = 1024
         for rel, size in sorted(members):
             needed = tar_entry_bytes(size, Path(rel).name)
-            if needed + 1024 > limit:
+            if needed + 10240 > limit:
                 standalone.append((rel, size))
                 continue
             if batch and estimate + needed > limit:
