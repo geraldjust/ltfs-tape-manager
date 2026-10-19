@@ -518,8 +518,12 @@ def source_browse():
         for item in entries:
             if item['name'].endswith('.tar') and not item['dir']:
                 item['archive']=(p/(item['name']+'.manifest.json')).is_file()
+        entries=[e for e in entries if not e['name'].endswith('.tar.manifest.json')]
+        for item in entries:
+            if item['name'].endswith('.tar') and not item['dir']:
+                item['archive']=(p/(item['name']+'.manifest.json')).is_file()
         return jsonify(ok=True,entries=entries,path=relative)
-    except (OSError,ValueError) as e:return jsonify(ok=False,error=str(e)),400
+    except (OSError,ValueError,KeyError,TypeError) as e:return jsonify(ok=False,error=str(e)),400
 
 @app.post('/api/estimate')
 def estimate():
