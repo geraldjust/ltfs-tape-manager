@@ -664,6 +664,8 @@ def write_start():
         busy=busy_mount_users()
         if busy:raise RuntimeError('Tape is busy: '+str(busy))
         aurora_exec(['sh','-c','command -v sha256sum >/dev/null && command -v cat >/dev/null && command -v mkdir >/dev/null && command -v dirname >/dev/null'])
+        dual_source_verify=data.get('dual_source_verify',False)
+        if not isinstance(dual_source_verify,bool):raise ValueError('Invalid SHA-256 mode')
         plan=write_plan(data.get('paths',[]),data.get('all') is True)
         conflicts=write_conflicts(plan)
         resolutions=data.get('resolutions',{})
@@ -688,7 +690,7 @@ def write_start():
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
                bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
-        threading.Thread(target=write_worker,args=(frozen,),daemon=True).start()
+        threading.Thread(target=write_worker,args=(frozen,dual_source_verify),daemon=True).start()
         return jsonify(ok=True,files=len(frozen),bytes=total,message='Write started; do not interrupt or eject'),202
     except Exception as e:
         lock.release();return jsonify(ok=False,error=str(e)),409
@@ -847,7 +849,7 @@ def verify_tape_batch(wrote,offset=0,total=None):
         close=getattr(stream,'close',None)
         if close:close()
 
-def write_worker(plan):
+def write_worker(plan, dual_source_verify=False):
     wrote=[]
     try:
         # The plan is metadata-only; SHA-256 is computed while each file streams
@@ -878,6 +880,15 @@ def write_worker(plan):
         if mode()!='ro':raise RuntimeError('Read-only remount not confirmed')
         update(stage='verifying',message='Sequential SHA-256 verification of committed tape files')
         verify_tape_batch(wrote)
+        if dual_source_verify:
+            update(stage='verifying',message='Dual-pass: independently re-reading original source files')
+            for i,(rel,p,size,target,expected) in enumerate(wrote):
+                if p.stat().st_size!=size:
+                    raise RuntimeError('Source size changed before second SHA-256 pass: '+rel)
+                digest=hash_file(p)
+                if digest!=expected:
+                    raise RuntimeError('Second source SHA-256 differs from tape-verified data: '+rel)
+                update(message=f'Dual-pass source verified {i+1}/{len(wrote)}: '+rel)
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
                state='completed',file='',
                message=f'Write committed and SHA-256 verified: {len(wrote)} files')
