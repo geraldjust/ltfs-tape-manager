@@ -846,32 +846,64 @@ printf '%s\\n' "$digest"
         t.join(timeout=4)
 
 def verify_tape_batch(wrote,offset=0,total=None):
-    """Verify committed LTFS bytes continuously, including single large files."""
+    """Verify committed files via Aurora's own RO /ltfs mount, not stale /tape.
+    Stream the digest in the worker container; poll byte progress via a worker
+    temp file while the hashing command runs. Never stage tape data on disk.
+    """
     if not wrote:return
-    all_bytes=sum(x[2] for x in wrote)
+    all_bytes=sum(item[2] for item in wrote)
     verified_bytes=0
     update(verify_bytes_done=0,verify_bytes_total=all_bytes,verified=0,
            verify_total=len(wrote),verify_current=1)
     for index,(rel,p,size,target,expected) in enumerate(wrote):
-        if mode()!='ro':raise RuntimeError('Read-only LTFS mount lost during verification')
-        h=hashlib.sha256()
-        path=safe_path(TAPE,target)
-        if path.stat().st_size!=size:
-            raise RuntimeError('Tape file size mismatch: '+target)
+        if mode()!='ro':
+            raise RuntimeError('Read-only LTFS mount lost during verification')
+        token=uuid.uuid4().hex
+        progress='/tmp/ltfs-verify-progress-'+token
+        path='/ltfs/'+target
         update(verify_current=index+1,file=target,
                message=f'Verifying tape bytes {index+1}/{len(wrote)}: '+target)
-        with open(path,'rb') as reader:
-            current=0
-            last_update=time.monotonic()
-            while True:
-                chunk=reader.read(4*1024*1024)
-                if not chunk:break
-                h.update(chunk)
-                current+=len(chunk)
-                if time.monotonic()-last_update>=0.5:
-                    update(verify_bytes_done=verified_bytes+current)
-                    last_update=time.monotonic()
-        if h.hexdigest()!=expected:
+        completed=threading.Event()
+        base=verified_bytes
+        def poll():
+            last=0
+            while not completed.wait(2):
+                try:
+                    value=aurora_exec(['cat',progress])
+                    current=min(size,max(last,int(value)))
+                    last=current
+                    update(verify_bytes_done=base+current)
+                except (ValueError,RuntimeError,IndexError):
+                    pass
+        script=r'''set -euo pipefail
+path="$1"; expected="$2"; progress="$3"
+actual="$(stat -c %s -- "$path")"
+[ "$actual" = "$expected" ] || { echo "Tape file size mismatch: $path ($actual != $expected)" >&2; exit 1; }
+# Hash from the committed tape, not the source. /proc read_bytes is an
+# approximate progress signal only; the SHA-256 result is authoritative.
+sha256sum -- "$path" &
+pid=$!
+cleanup() { kill "$pid" 2>/dev/null || true; rm -f -- "$progress"; }
+trap cleanup EXIT
+while kill -0 "$pid" 2>/dev/null; do
+  if [ -r "/proc/$pid/io" ]; then
+    awk '/^rchar:/ {print $2}' "/proc/$pid/io" > "$progress" 2>/dev/null || true
+  fi
+  sleep 2
+done
+wait "$pid"
+'''
+        thread=threading.Thread(target=poll,daemon=True)
+        thread.start()
+        try:
+            output=aurora_exec(['bash','-c',script,'ltfs-verify',path,str(size),progress])
+        finally:
+            completed.set()
+            thread.join(timeout=5)
+        lines=[line.strip() for line in output.splitlines() if line.strip()]
+        if not lines or not re.fullmatch(r'[0-9a-f]{64}',lines[-1].split()[0]):
+            raise RuntimeError('Aurora returned no valid SHA-256 for '+target)
+        if lines[-1].split()[0]!=expected:
             raise RuntimeError('Committed tape SHA-256 mismatch: '+target)
         verified_bytes+=size
         update(verified=index+1,verify_bytes_done=verified_bytes,
