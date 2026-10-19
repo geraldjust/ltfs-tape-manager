@@ -889,6 +889,9 @@ def write_tar_in_aurora(archive, entries, base_bytes):
         if p.is_symlink() or p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
             raise RuntimeError('TAR source changed: '+rel)
         members.append({'name':Path(rel).name,'size':size,'sha256':hash_file(p)})
+    for rel,p,size,target,mtime in entries:
+        if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+            raise RuntimeError('TAR source changed during pre-hash: '+rel)
     folder=str(Path(entries[0][0]).parent)
     names=[Path(e[0]).name for e in entries]
     if len(set(names))!=len(names):
@@ -915,7 +918,7 @@ wait "$hasher"
 hasher=''
 sha="$(cut -d ' ' -f 1 < "$digest")"
 size="$(stat -c %s -- "$out")"
-printf '%s %s\\n' "$sha" "$size"
+printf '%s %s\n' "$sha" "$size"
 '''
     result=aurora_exec(['bash','-c',script,'ltfs-tar',
                         '/source/'+folder if folder!='.' else '/source',
