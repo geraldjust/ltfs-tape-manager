@@ -40,6 +40,8 @@ class HashingReader:
 class MemberReader:
     def __init__(self, path, expected_size, expected_mtime):
         self.path, self.remaining = path, expected_size
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("Unsafe TAR source: " + str(path))
         self.raw = open(path, "rb")
         self.hash = hashlib.sha256()
         st = path.stat()
