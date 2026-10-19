@@ -947,7 +947,7 @@ def write_tar_in_aurora(archive, entries, base_bytes):
         raise RuntimeError('Duplicate TAR member names')
     token=uuid.uuid4().hex
     list_name='ltfs-tar-list-'+token
-    aurora_stage_bytes(list_name,b''.join(os.fsencode(name)+b'\\0' for name in names))
+    aurora_stage_bytes(list_name,b''.join(os.fsencode(name)+b'\0' for name in names))
     script=r'''set -euo pipefail
 folder="$1"; out="$2"; manifest="$3"; token="$4"
 list="/tmp/ltfs-tar-list-$token"
