@@ -1,4 +1,4 @@
-import os, json, time, uuid, shutil, hashlib, threading, re, subprocess, glob, base64
+import os, json, time, uuid, shutil, hashlib, threading, re, subprocess, glob, base64, io, tarfile
 from tar_planning import plan_archives
 from tar_runtime import create_archive, load_manifest, extract_members
 from pathlib import Path
@@ -909,6 +909,23 @@ wait "$pid"
         update(verified=index+1,verify_bytes_done=verified_bytes,
                message=f'Verified tape bytes {verified_bytes}/{all_bytes}: '+target)
 
+def aurora_stage_bytes(filename, payload):
+    """Stage small control files via Docker archive upload, never argv.
+    Tape payloads themselves continue to stream directly from /source to /ltfs.
+    """
+    buffer=io.BytesIO()
+    with tarfile.open(fileobj=buffer,mode='w') as bundle:
+        info=tarfile.TarInfo(filename)
+        info.size=len(payload)
+        info.mode=0o600
+        bundle.addfile(info,io.BytesIO(payload))
+    c=aurora()
+    if not c or c.status!='running':
+        raise RuntimeError('Aurora container stopped while staging TAR metadata')
+    if not c.put_archive('/tmp',buffer.getvalue()):
+        raise RuntimeError('Unable to stage TAR metadata in Aurora')
+
+
 def write_tar_in_aurora(archive, entries, base_bytes):
     """Stream GNU TAR directly into Aurora's own /ltfs mount, never manager /tape.
     Source SHA-256 is precomputed (extra HDD read) to retain per-member manifests.
@@ -929,8 +946,11 @@ def write_tar_in_aurora(archive, entries, base_bytes):
     if len(set(names))!=len(names):
         raise RuntimeError('Duplicate TAR member names')
     token=uuid.uuid4().hex
+    list_name='ltfs-tar-list-'+token
+    aurora_stage_bytes(list_name,b''.join(os.fsencode(name)+b'\\0' for name in names))
     script=r'''set -euo pipefail
-folder="$1"; out="$2"; manifest="$3"; token="$4"; shift 4
+folder="$1"; out="$2"; manifest="$3"; token="$4"
+list="/tmp/ltfs-tar-list-$token"
 mkdir -p -- "$(dirname -- "$out")"
 [ ! -e "$out" ] && [ ! -e "$manifest" ] || { echo "TAR target already exists" >&2; exit 1; }
 fifo="/tmp/ltfs-tar-hash-$token"
@@ -939,13 +959,13 @@ mkfifo -- "$fifo"
 hasher=''
 cleanup() {
   [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
-  rm -f -- "$fifo" "$digest"
+  rm -f -- "$fifo" "$digest" "$list"
 }
 trap cleanup EXIT
 sha256sum < "$fifo" > "$digest" &
 hasher=$!
 set -C
-tar --format=pax -C "$folder" -cf - -- "$@" | tee "$fifo" > "$out"
+tar --format=pax -C "$folder" --null -T "$list" -cf - | tee "$fifo" > "$out"
 wait "$hasher"
 hasher=''
 sha="$(cut -d ' ' -f 1 < "$digest")"
@@ -954,7 +974,7 @@ printf '%s %s\n' "$sha" "$size"
 '''
     result=aurora_exec(['bash','-c',script,'ltfs-tar',
                         '/source/'+folder if folder!='.' else '/source',
-                        '/ltfs/'+archive['path'],'/ltfs/'+archive['manifest'],token,*names])
+                        '/ltfs/'+archive['path'],'/ltfs/'+archive['manifest'],token])
     fields=result.splitlines()[-1].split()
     if len(fields)!=2 or not re.fullmatch(r'[0-9a-f]{64}',fields[0]):
         raise RuntimeError('Aurora TAR hash result invalid: '+result[-300:])
@@ -964,9 +984,13 @@ printf '%s %s\n' "$sha" "$size"
             raise RuntimeError('TAR source changed during streaming: '+rel)
     data={'schema':1,'archive':Path(archive['path']).name,'members':members,
           'archive_size':size,'archive_sha256':digest}
-    encoded=base64.b64encode(json.dumps(data,separators=(',',':'),ensure_ascii=False).encode()).decode()
-    aurora_exec(['sh','-c','set -eu; [ ! -e "$1" ]; printf %s "$2" | base64 -d > "$1"',
-                 'ltfs-manifest','/ltfs/'+archive['manifest'],encoded])
+    manifest_name='ltfs-tar-manifest-'+token
+    aurora_stage_bytes(manifest_name,json.dumps(data,separators=(',',':'),ensure_ascii=False).encode())
+    try:
+        aurora_exec(['sh','-c','set -eu; [ ! -e "$1" ]; set -C; cat -- "$2" > "$1"',
+                     'ltfs-manifest','/ltfs/'+archive['manifest'],'/tmp/'+manifest_name])
+    finally:
+        aurora_exec(['rm','-f','--','/tmp/'+manifest_name])
     update(bytes_done=min(job['bytes_total'],base_bytes+sum(e[2] for e in entries)))
     return data
 
