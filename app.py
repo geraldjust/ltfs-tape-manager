@@ -22,7 +22,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.8'
+VERSION='1.6.9'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -694,7 +694,7 @@ def write_start():
         lock.release();return jsonify(ok=False,error=str(e)),409
 
 def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
-    """Stream source once through tee to LTFS and SHA-256 concurrently.
+    """Stream buffered source once through tee to LTFS and SHA-256 concurrently.
 
     The hash is computed from the source stream delivered to the tape writer.
     Tape-side verification still happens independently after the RO remount.
@@ -722,31 +722,41 @@ mkfifo -- "$data_fifo" "$hash_fifo"
 producer=''
 consumer=''
 hasher=''
+monitor_pid=''
 cleanup() {
   [ -z "$producer" ] || kill "$producer" 2>/dev/null || true
   [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
   [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
+  [ -z "$monitor_pid" ] || kill "$monitor_pid" 2>/dev/null || true
   rm -f -- "$progress_file" "$data_fifo" "$hash_fifo" "$hash_result"
 }
 trap cleanup EXIT
 sha256sum < "$hash_fifo" > "$hash_result" &
 hasher=$!
 # tee reads the source only once; one output feeds SHA-256, the other LTFS.
-tee -- "$hash_fifo" < "$1" > "$data_fifo" &
+stdbuf -i 1048576 -o 1048576 tee -- "$hash_fifo" < "$1" > "$data_fifo" &
 producer=$!
 set -C
 cat < "$data_fifo" > "$2" &
 consumer=$!
-while kill -0 "$consumer" 2>/dev/null; do
-  if [ -r "/proc/$consumer/io" ]; then
-    awk '/^rchar:/ {print $2}' "/proc/$consumer/io" >| "$3" 2>/dev/null || true
-  fi
-  sleep 2
-done
+# Poll progress in the background; do not sleep between files.
+# The foreground waits immediately for the LTFS writer to finish.
+(
+  while kill -0 "$consumer" 2>/dev/null; do
+    if [ -r "/proc/$consumer/io" ]; then
+      awk '/^rchar:/ {print $2}' "/proc/$consumer/io" >| "$progress_file" 2>/dev/null || true
+    fi
+    sleep 1
+  done
+) &
+monitor_pid=$!
 if ! wait "$consumer"; then
   exit 1
 fi
 consumer=''
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+monitor_pid=''
 wait "$producer"
 producer=''
 wait "$hasher"
