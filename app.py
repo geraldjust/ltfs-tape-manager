@@ -1015,9 +1015,14 @@ def write_worker(plan, dual_source_verify=False, archives=None):
         verify_tape_batch(wrote)
         if dual_source_verify:
             for archive in archives:
-                manifest=load_manifest(safe_path(TAPE,archive['path']))
+                # Read the manifest through Aurora's current RO mount; /tape
+                # may retain an obsolete FUSE connection after remount.
+                raw=aurora_exec(['cat','/ltfs/'+archive['manifest']])
+                manifest=json.loads(raw)
+                if manifest.get('schema')!=1 or manifest.get('archive')!=Path(archive['path']).name:
+                    raise RuntimeError('Invalid committed TAR manifest: '+archive['path'])
                 for member in manifest['members']:
-                    entry=by_rel[str((__import__('pathlib').Path(archive['path']).parent / member['name']))]
+                    entry=by_rel[str(Path(archive['path']).parent / member['name'])]
                     if hash_file(entry[1])!=member['sha256']:
                         raise RuntimeError('Second source SHA-256 differs for TAR member: '+entry[0])
             update(stage='verifying',message='Dual-pass: independently re-reading original source files')
