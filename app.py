@@ -1,4 +1,4 @@
-import os, json, time, uuid, shutil, hashlib, threading, re, subprocess, glob
+import os, json, time, uuid, shutil, hashlib, threading, re, subprocess, glob, base64
 from tar_planning import plan_archives
 from tar_runtime import create_archive, load_manifest, extract_members
 from pathlib import Path
@@ -439,7 +439,7 @@ def mounted_volume_identity(m):
 
 def status_data():
     m=mode();capacity={}
-    if m in ('ro','rw'):
+    if m=='ro' and not lock.locked() and job.get('state')!='running':
         try:
             st=os.statvfs(TAPE);capacity={'total':st.f_blocks*st.f_frsize,'free':st.f_bavail*st.f_frsize}
             capacity['used']=capacity['total']-capacity['free']
@@ -528,7 +528,8 @@ def source_browse():
 @app.post('/api/estimate')
 def estimate():
     data=request.get_json(silent=True) or {};base=SRC if data.get('kind')=='write' else TAPE
-    if base==TAPE and mode()=='unmounted':return jsonify(ok=False,error='Tape not mounted'),409
+    if lock.locked():return jsonify(ok=False,error='Tape operation in progress; estimate paused'),409
+    if base==TAPE and mode()!='ro':return jsonify(ok=False,error='Tape not mounted read-only'),409
     try:
         selected=data.get('paths',[])
         if not isinstance(selected,list) or len(selected)>10000:raise ValueError('Invalid selection')
@@ -541,7 +542,7 @@ def estimate():
             for file,_,size in items:
                 if file not in seen:seen.add(file);total+=size;count+=1
         free=None
-        if mode()!='unmounted':
+        if not lock.locked() and mode()=='ro':
             st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
         if base==TAPE:
             space=destination_space()
@@ -552,7 +553,8 @@ def estimate():
 
 @app.get('/api/browse')
 def browse():
-    if mode()=='unmounted':return jsonify(ok=False,error='Tape not mounted'),409
+    if lock.locked():return jsonify(ok=False,error='Tape operation in progress; browsing paused'),409
+    if mode()!='ro':return jsonify(ok=False,error='Tape not mounted read-only'),409
     try:
         relative=request.args.get('path','')
         if relative.endswith('::'):
@@ -747,7 +749,7 @@ def write_start():
         # Freeze size and mtime: detect source changes before copying each file.
         frozen=[(rel,p,size,target,p.stat().st_mtime_ns) for rel,p,size,target in effective]
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
-               bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
+               bytes_done=0,bytes_total=total,verify_bytes_done=0,verify_bytes_total=0,verify_current=0,verify_total=0,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
         threading.Thread(target=write_worker,args=(frozen,dual_source_verify,archives),daemon=True).start()
         return jsonify(ok=True,files=len(frozen),bytes=total,message='Write started; do not interrupt or eject'),202
@@ -875,12 +877,67 @@ def verify_tape_batch(wrote,offset=0,total=None):
         update(verified=index+1,verify_bytes_done=verified_bytes,
                message=f'Verified tape bytes {verified_bytes}/{all_bytes}: '+target)
 
+def write_tar_in_aurora(archive, entries, base_bytes):
+    """Stream GNU TAR directly into Aurora's own /ltfs mount, never manager /tape.
+    Source SHA-256 is precomputed (extra HDD read) to retain per-member manifests.
+    No intermediate archive or HDD staging is created.
+    """
+    if mode()!='rw':
+        raise RuntimeError('Aurora read-write mount unavailable before TAR write')
+    members=[]
+    for rel,p,size,target,mtime in entries:
+        if p.is_symlink() or p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
+            raise RuntimeError('TAR source changed: '+rel)
+        members.append({'name':Path(rel).name,'size':size,'sha256':hash_file(p)})
+    folder=str(Path(entries[0][0]).parent)
+    names=[Path(e[0]).name for e in entries]
+    if len(set(names))!=len(names):
+        raise RuntimeError('Duplicate TAR member names')
+    token=uuid.uuid4().hex
+    script=r'''set -euo pipefail
+folder="$1"; out="$2"; manifest="$3"; token="$4"; shift 4
+mkdir -p -- "$(dirname -- "$out")"
+[ ! -e "$out" ] && [ ! -e "$manifest" ] || { echo "TAR target already exists" >&2; exit 1; }
+fifo="/tmp/ltfs-tar-hash-$token"
+digest="/tmp/ltfs-tar-digest-$token"
+mkfifo -- "$fifo"
+hasher=''
+cleanup() {
+  [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
+  rm -f -- "$fifo" "$digest"
+}
+trap cleanup EXIT
+sha256sum < "$fifo" > "$digest" &
+hasher=$!
+set -C
+tar --format=pax -C "$folder" -cf - -- "$@" | tee "$fifo" > "$out"
+wait "$hasher"
+hasher=''
+sha="$(cut -d ' ' -f 1 < "$digest")"
+size="$(stat -c %s -- "$out")"
+printf '%s %s\\n' "$sha" "$size"
+'''
+    result=aurora_exec(['bash','-c',script,'ltfs-tar',
+                        '/source/'+folder if folder!='.' else '/source',
+                        '/ltfs/'+archive['path'],'/ltfs/'+archive['manifest'],token,*names])
+    fields=result.splitlines()[-1].split()
+    if len(fields)!=2 or not re.fullmatch(r'[0-9a-f]{64}',fields[0]):
+        raise RuntimeError('Aurora TAR hash result invalid: '+result[-300:])
+    digest,size=fields[0],int(fields[1])
+    data={'schema':1,'archive':Path(archive['path']).name,'members':members,
+          'archive_size':size,'archive_sha256':digest}
+    encoded=base64.b64encode(json.dumps(data,separators=(',',':'),ensure_ascii=False).encode()).decode()
+    aurora_exec(['sh','-c','set -eu; [ ! -e "$1" ]; printf %s "$2" | base64 -d > "$1"',
+                 'ltfs-manifest','/ltfs/'+archive['manifest'],encoded])
+    update(bytes_done=min(job['bytes_total'],base_bytes+sum(e[2] for e in entries)))
+    return data
+
 def write_worker(plan, dual_source_verify=False, archives=None):
     wrote=[]
     try:
         # The plan is metadata-only; SHA-256 is computed while each file streams
         # to tape, avoiding an extra full read of mechanical source disks.
-        update(stage='preparing',message='Source scan complete; SHA-256 will be calculated during writing')
+        update(stage='preparing',message='Source scan complete; TAR member SHA-256 requires a source pre-read')
         # All tape I/O occurs inside Aurora's mount namespace.
         update(stage='mounting',message='Switching LTFS to read-write; do not interrupt')
         mount_aurora(True,allow_stale=True)
@@ -907,13 +964,9 @@ def write_worker(plan, dual_source_verify=False, archives=None):
             target=archive['path']
             update(stage='writing',file=target,
                    message=f'Writing TAR {index+1}/{len(archives)}: '+target)
-            tape_path=safe_path(TAPE,target)
-            manifest_path=safe_path(TAPE,archive['manifest'])
-            manifest=create_archive(tape_path,manifest_path,
-                [(rel,p,size,mtime) for rel,p,size,_,mtime in entries],
-                callback=lambda n:update(bytes_done=min(job['bytes_total'],sum(x[2] for x in wrote)+n)))
+            manifest=write_tar_in_aurora(archive,entries,sum(x[2] for x in wrote))
             wrote.append((target,entries[0][1],manifest['archive_size'],target,manifest['archive_sha256']))
-            update(done=len(direct)+index+1)
+            update(done=len(direct)+sum(len(a['members']) for a in archives[:index+1]))
         update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),
                stage='committing',message='Committing LTFS index; do not interrupt')
         stop_aurora()
@@ -939,9 +992,10 @@ def write_worker(plan, dual_source_verify=False, archives=None):
                     raise RuntimeError('Second source SHA-256 differs from tape-verified data: '+rel)
                 update(message=f'Dual-pass source verified {i+1}/{len(wrote)}: '+rel)
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
-               state='completed',file='',
-               message=f'Write committed and SHA-256 verified: {len(wrote)} files')
+               state='completed',file='',done=len(plan),bytes_done=job['bytes_total'],
+               message=f'Write committed and SHA-256 verified: {len(wrote)} tape objects from {len(plan)} source files')
     except Exception as e:
+        record_mount_failure('Write failure: '+str(e))
         update(stage='failed',state='failed',verification_error=str(e),
                message='Write stopped: '+str(e))
         try:
