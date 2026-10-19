@@ -514,7 +514,10 @@ def source_browse():
         relative=request.args.get('path','');p=safe_path(SRC,relative)
         if not p.is_dir():raise ValueError('Not a directory')
         entries=[{'name':x.name,'path':str(x.relative_to(SRC)),'dir':x.is_dir(),'bytes':x.stat().st_size if x.is_file() else None}
-                 for x in sorted(p.iterdir(),key=lambda x:(not x.is_dir(),x.name.lower())) if not x.is_symlink()]
+                 for x in sorted(p.iterdir(),key=lambda x:(not x.is_dir(),x.name.lower())) if not x.is_symlink() and not x.name.endswith('.tar.manifest.json')]
+        for item in entries:
+            if item['name'].endswith('.tar') and not item['dir']:
+                item['archive']=(p/(item['name']+'.manifest.json')).is_file()
         return jsonify(ok=True,entries=entries,path=relative)
     except (OSError,ValueError) as e:return jsonify(ok=False,error=str(e)),400
 
@@ -547,7 +550,14 @@ def estimate():
 def browse():
     if mode()=='unmounted':return jsonify(ok=False,error='Tape not mounted'),409
     try:
-        relative=request.args.get('path','');p=safe_path(TAPE,relative)
+        relative=request.args.get('path','')
+        if relative.endswith('::'):
+            archive=safe_path(TAPE,relative[:-2])
+            manifest=load_manifest(archive)
+            entries=[{'name':m['name'],'path':relative+m['name'],'dir':False,
+                      'bytes':m['size']} for m in manifest['members']]
+            return jsonify(ok=True,entries=entries,path=relative)
+        p=safe_path(TAPE,relative)
         if not p.is_dir():raise ValueError('Not a directory')
         entries=[{'name':x.name,'path':str(x.relative_to(TAPE)),'dir':x.is_dir(),'bytes':x.stat().st_size if x.is_file() else None}
                  for x in sorted(p.iterdir(),key=lambda x:(not x.is_dir(),x.name.lower())) if not x.is_symlink()]
@@ -591,11 +601,22 @@ def read_plan(paths):
     for rel in paths:
         if not isinstance(rel,str) or not rel or rel.startswith('/') or '\\' in rel:
             raise ValueError('Invalid selected path')
+        if '::' in rel:
+            archive_rel,member=rel.split('::',1)
+            archive=safe_path(TAPE,archive_rel)
+            manifest=load_manifest(archive)
+            matches=[m for m in manifest['members'] if not member or m['name']==member]
+            if not matches:raise ValueError('Unknown TAR member: '+rel)
+            for m in matches:
+                selected.append((archive_rel+'::'+m['name'],archive,m['size']))
+            continue
         p=safe_path(TAPE,rel)
         if p.is_symlink() or not p.exists():raise ValueError('Selected item missing or symlink: '+rel)
         selected.append(p)
     files={}
     for p in selected:
+        if isinstance(p,tuple):
+            files[p[0]]=(p[1],p[2]);continue
         if p.is_file():files[str(p.relative_to(TAPE))]=(p,p.stat().st_size)
         elif p.is_dir():
             for f,_,size in files_under(p):files[str(f.relative_to(TAPE))]=(f,size)
@@ -960,7 +981,27 @@ def read_worker(plan,out):
     try:
         require_destination_space(sum(size for _,_,size in plan),'restore start')
         out.mkdir(parents=True,exist_ok=False)
+        archive_groups={}
+        for rel,src,size in plan:
+            if '::' in rel:
+                archive_groups.setdefault(str(src),[]).append(rel.split('::',1)[1])
+        completed_archives=set()
         for index,(rel,src,size) in enumerate(plan):
+            if '::' in rel:
+                archive_rel=rel.split('::',1)[0]
+                if archive_rel in completed_archives:continue
+                completed_archives.add(archive_rel)
+                members=archive_groups[str(src)]
+                target_dir=safe_path(out,str(Path(archive_rel).parent))
+                target_dir.mkdir(parents=True,exist_ok=True)
+                if any(x.is_symlink() for x in [target_dir,*target_dir.parents] if x!=Path('/')):
+                    raise RuntimeError('Unsafe TAR restore directory')
+                update(stage='copying',file=archive_rel,
+                       message='Sequentially restoring TAR members: '+archive_rel)
+                extract_members(src,target_dir,members)
+                update(done=job.get('done',0)+len(members),
+                       verified=job.get('verified',0)+len(members))
+                continue
             if mode()!='ro':raise RuntimeError('LTFS mount lost during restore')
             require_destination_space(sum(item[2] for item in plan[index:]),'before next file')
             dst=safe_path(out,rel)
