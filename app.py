@@ -927,6 +927,9 @@ printf '%s %s\n' "$sha" "$size"
     if len(fields)!=2 or not re.fullmatch(r'[0-9a-f]{64}',fields[0]):
         raise RuntimeError('Aurora TAR hash result invalid: '+result[-300:])
     digest,size=fields[0],int(fields[1])
+    for rel,p,expected_size,target,mtime in entries:
+        if p.stat().st_size!=expected_size or p.stat().st_mtime_ns!=mtime:
+            raise RuntimeError('TAR source changed during streaming: '+rel)
     data={'schema':1,'archive':Path(archive['path']).name,'members':members,
           'archive_size':size,'archive_sha256':digest}
     encoded=base64.b64encode(json.dumps(data,separators=(',',':'),ensure_ascii=False).encode()).decode()
