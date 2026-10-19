@@ -1,4 +1,6 @@
 import os, json, time, uuid, shutil, hashlib, threading, re, subprocess, glob
+from tar_planning import plan_archives
+from tar_runtime import create_archive, load_manifest, extract_members
 from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
@@ -666,6 +668,10 @@ def write_start():
         aurora_exec(['sh','-c','command -v sha256sum >/dev/null && command -v cat >/dev/null && command -v mkdir >/dev/null && command -v dirname >/dev/null'])
         dual_source_verify=data.get('dual_source_verify',False)
         if not isinstance(dual_source_verify,bool):raise ValueError('Invalid SHA-256 mode')
+        tar_enabled=data.get('tar_enabled',False)
+        if not isinstance(tar_enabled,bool):raise ValueError('Invalid TAR setting')
+        threshold=data.get('tar_threshold_mib',16)
+        max_archive=data.get('tar_max_gib',32)
         plan=write_plan(data.get('paths',[]),data.get('all') is True)
         conflicts=write_conflicts(plan)
         resolutions=data.get('resolutions',{})
@@ -682,6 +688,21 @@ def write_start():
             else:target=rel
             effective.append((rel,p,size,target))
         if not effective:raise ValueError('No new files to write')
+        archives=[]
+        if tar_enabled:
+            direct,archives=plan_archives([(rel,size) for rel,p,size,target in effective],
+                                           threshold,max_archive)
+            direct_paths={rel for rel,_ in direct}
+            by_rel={rel:(rel,p,size,target) for rel,p,size,target in effective}
+            for archive in archives:
+                if tape_exists(archive['path']) or tape_exists(archive['manifest']):
+                    raise ValueError('TAR output already exists: '+archive['path'])
+                for rel,_ in archive['members']:
+                    if by_rel[rel][3]!=rel:
+                        raise ValueError('Cannot TAR a renamed duplicate: '+rel)
+            effective=[by_rel[rel] for rel,_ in direct] + [
+                by_rel[rel] for archive in archives for rel,_ in archive['members']]
+
         total=sum(x[2] for x in effective)
         st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
         if total+1024**3>free:raise RuntimeError('Insufficient reported tape free space including 1 GiB safety margin')
@@ -690,7 +711,7 @@ def write_start():
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
                bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
-        threading.Thread(target=write_worker,args=(frozen,dual_source_verify),daemon=True).start()
+        threading.Thread(target=write_worker,args=(frozen,dual_source_verify,archives),daemon=True).start()
         return jsonify(ok=True,files=len(frozen),bytes=total,message='Write started; do not interrupt or eject'),202
     except Exception as e:
         lock.release();return jsonify(ok=False,error=str(e)),409
@@ -785,71 +806,38 @@ printf '%s\\n' "$digest"
         t.join(timeout=4)
 
 def verify_tape_batch(wrote,offset=0,total=None):
-    """Verify committed tape files sequentially, reporting each finished SHA-256.
-
-    Stream sha256sum's NUL-delimited results so the GUI advances after each
-    verified file, rather than waiting for the entire tape verification pass.
-    Each file is read only once after the read-only remount.
-    """
+    """Verify committed LTFS bytes continuously, including single large files."""
     if not wrote:return
-    if total is None:total=len(wrote)
-    if len(wrote)>64:
-        for start in range(0,len(wrote),64):
-            verify_tape_batch(wrote[start:start+64],offset+start,total)
-        return
-    c=aurora()
-    if not c or c.status!='running':
-        raise RuntimeError('Aurora container stopped during verification')
-    paths=['/ltfs/'+target for _,_,_,target,_ in wrote]
-    script='set -eu; exec sha256sum --zero -- "$@"'
-    execution=c.client.api.exec_create(c.id,
-        ['sh','-c',script,'verify-tape',*paths],stdout=True,stderr=True,tty=False)
-    exec_id=execution['Id']
-    stream=c.client.api.exec_start(exec_id,stream=True,demux=True)
-    pending=b''
-    stderr_tail=b''
-    count=0
-    try:
-        update(verify_current=offset+1,verify_total=total,
-               message=f'Verifying committed tape file {offset+1}/{total}: {wrote[0][3]}')
-        for stdout,stderr in stream:
-            if stderr:
-                stderr_tail=(stderr_tail+stderr)[-1200:]
-            if not stdout:continue
-            pending+=stdout
-            while b'\0' in pending:
-                record,pending=pending.split(b'\0',1)
-                if count>=len(wrote):
-                    raise RuntimeError('Unexpected extra tape SHA-256 result')
-                _,p,size,target,expected=wrote[count]
-                if len(record)<66 or record[64:66]!=b'  ':
-                    raise RuntimeError('Invalid tape SHA-256 record: '+target)
-                digest=record[:64].decode('ascii')
-                if not re.fullmatch('[0-9a-f]{64}',digest):
-                    raise RuntimeError('Invalid tape SHA-256 digest: '+target)
-                if digest!=expected:
-                    raise RuntimeError('SHA-256 mismatch after read-only remount: '+target)
-                if p.stat().st_size!=size:
-                    raise RuntimeError('Source size changed during verification: '+target)
-                count+=1
-                fields={'verified':offset+count,'file':target,
-                        'message':f'Verified committed tape file {offset+count}/{total}: {target}'}
-                if count<len(wrote):
-                    fields['verify_current']=offset+count+1
-                    fields['message']+=f' — next: {wrote[count][3]}'
-                update(**fields)
-        status=c.client.api.exec_inspect(exec_id)
-        if status.get('ExitCode')!=0:
-            raise RuntimeError('Tape verification command failed: '+
-                               stderr_tail.decode('utf-8','replace')[-600:])
-        if pending or count!=len(wrote):
-            raise RuntimeError('Incomplete tape verification output: '+
-                               str(count)+'/'+str(len(wrote))+' files')
-    finally:
-        close=getattr(stream,'close',None)
-        if close:close()
+    all_bytes=sum(x[2] for x in wrote)
+    verified_bytes=0
+    update(verify_bytes_done=0,verify_bytes_total=all_bytes,verified=0,
+           verify_total=len(wrote),verify_current=1)
+    for index,(rel,p,size,target,expected) in enumerate(wrote):
+        if mode()!='ro':raise RuntimeError('Read-only LTFS mount lost during verification')
+        h=hashlib.sha256()
+        path=safe_path(TAPE,target)
+        if path.stat().st_size!=size:
+            raise RuntimeError('Tape file size mismatch: '+target)
+        update(verify_current=index+1,file=target,
+               message=f'Verifying tape bytes {index+1}/{len(wrote)}: '+target)
+        with open(path,'rb') as reader:
+            current=0
+            last_update=time.monotonic()
+            while True:
+                chunk=reader.read(4*1024*1024)
+                if not chunk:break
+                h.update(chunk)
+                current+=len(chunk)
+                if time.monotonic()-last_update>=0.5:
+                    update(verify_bytes_done=verified_bytes+current)
+                    last_update=time.monotonic()
+        if h.hexdigest()!=expected:
+            raise RuntimeError('Committed tape SHA-256 mismatch: '+target)
+        verified_bytes+=size
+        update(verified=index+1,verify_bytes_done=verified_bytes,
+               message=f'Verified tape bytes {verified_bytes}/{all_bytes}: '+target)
 
-def write_worker(plan, dual_source_verify=False):
+def write_worker(plan, dual_source_verify=False, archives=None):
     wrote=[]
     try:
         # The plan is metadata-only; SHA-256 is computed while each file streams
@@ -859,7 +847,11 @@ def write_worker(plan, dual_source_verify=False):
         update(stage='mounting',message='Switching LTFS to read-write; do not interrupt')
         mount_aurora(True,allow_stale=True)
         if mode()!='rw':raise RuntimeError('Read-write mount not confirmed')
-        for i,(rel,p,size,target,mtime) in enumerate(plan):
+        archives=archives or []
+        packed={rel for archive in archives for rel,_ in archive['members']}
+        direct=[entry for entry in plan if entry[0] not in packed]
+        by_rel={entry[0]:entry for entry in plan}
+        for i,(rel,p,size,target,mtime) in enumerate(direct):
             if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
                 raise RuntimeError('Source file changed before writing: '+rel)
             src='/source/'+rel;dst='/ltfs/'+target
@@ -872,6 +864,18 @@ def write_worker(plan, dual_source_verify=False):
                 raise RuntimeError('Source changed while writing: '+rel)
             wrote.append((rel,p,size,target,streamed_hash))
             update(done=i+1,bytes_done=sum(x[2] for x in wrote))
+        for index,archive in enumerate(archives):
+            entries=[by_rel[rel] for rel,_ in archive['members']]
+            target=archive['path']
+            update(stage='writing',file=target,
+                   message=f'Writing TAR {index+1}/{len(archives)}: '+target)
+            tape_path=safe_path(TAPE,target)
+            manifest_path=safe_path(TAPE,archive['manifest'])
+            manifest=create_archive(tape_path,manifest_path,
+                [(rel,p,size,mtime) for rel,p,size,_,mtime in entries],
+                callback=lambda n:update(bytes_done=min(job['bytes_total'],sum(x[2] for x in wrote)+n)))
+            wrote.append((target,entries[0][1],manifest['archive_size'],target,manifest['archive_sha256']))
+            update(done=len(direct)+index+1)
         update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),
                stage='committing',message='Committing LTFS index; do not interrupt')
         stop_aurora()
@@ -881,8 +885,15 @@ def write_worker(plan, dual_source_verify=False):
         update(stage='verifying',message='Sequential SHA-256 verification of committed tape files')
         verify_tape_batch(wrote)
         if dual_source_verify:
+            for archive in archives:
+                manifest=load_manifest(safe_path(TAPE,archive['path']))
+                for member in manifest['members']:
+                    entry=by_rel[str((__import__('pathlib').Path(archive['path']).parent / member['name']))]
+                    if hash_file(entry[1])!=member['sha256']:
+                        raise RuntimeError('Second source SHA-256 differs for TAR member: '+entry[0])
             update(stage='verifying',message='Dual-pass: independently re-reading original source files')
             for i,(rel,p,size,target,expected) in enumerate(wrote):
+                if rel in {a['path'] for a in archives}:continue
                 if p.stat().st_size!=size:
                     raise RuntimeError('Source size changed before second SHA-256 pass: '+rel)
                 digest=hash_file(p)
