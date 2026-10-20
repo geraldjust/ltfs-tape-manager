@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.7.4-dev'
+VERSION='1.7.5-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -533,14 +533,18 @@ def estimate():
     try:
         selected=data.get('paths',[])
         if not isinstance(selected,list) or len(selected)>10000:raise ValueError('Invalid selection')
-        seen=set();total=0;count=0
-        for rel in selected:
-            if not isinstance(rel,str):raise ValueError('Invalid path')
-            p=safe_path(base,rel)
-            if p.is_symlink() or not p.exists():raise ValueError('Invalid selection: '+rel)
-            items=files_under(p) if p.is_dir() else [(p,Path(p.name),p.stat().st_size)]
-            for file,_,size in items:
-                if file not in seen:seen.add(file);total+=size;count+=1
+        if base==TAPE:
+            plan=read_plan(selected) if selected else []
+            total=sum(size for _,_,size in plan);count=len(plan)
+        else:
+            seen=set();total=0;count=0
+            for rel in selected:
+                if not isinstance(rel,str):raise ValueError('Invalid path')
+                p=safe_path(base,rel)
+                if p.is_symlink() or not p.exists():raise ValueError('Invalid selection: '+rel)
+                items=files_under(p) if p.is_dir() else [(p,Path(p.name),p.stat().st_size)]
+                for file,_,size in items:
+                    if file not in seen:seen.add(file);total+=size;count+=1
         free=None
         if not lock.locked() and mode()=='ro':
             st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
@@ -557,16 +561,38 @@ def browse():
     if mode()!='ro':return jsonify(ok=False,error='Tape not mounted read-only'),409
     try:
         relative=request.args.get('path','')
-        if relative.endswith('::'):
-            archive=safe_path(TAPE,relative[:-2])
+        if '::' in relative:
+            archive_rel,prefix=relative.split('::',1)
+            archive=safe_path(TAPE,archive_rel)
             manifest=load_manifest(archive)
-            entries=[{'name':m['name'],'path':relative+m['name'],'dir':False,
-                      'bytes':m['size']} for m in manifest['members']]
+            prefix=prefix.strip('/')
+            if prefix and not any(m['name'].startswith(prefix+'/') for m in manifest['members']):
+                raise ValueError('Unknown TAR folder')
+            children={}
+            for m in manifest['members']:
+                name=m['name']
+                if prefix:
+                    if not name.startswith(prefix+'/'):continue
+                    name=name[len(prefix)+1:]
+                head,sep,_=name.partition('/')
+                member_path=(prefix+'/' if prefix else '')+head
+                virtual=archive_rel+'::'+member_path
+                if sep:
+                    children[head]={'name':head,'path':virtual,'dir':True,'bytes':None}
+                elif head not in children:
+                    children[head]={'name':head,'path':virtual,'dir':False,'bytes':m['size']}
+            entries=sorted(children.values(),key=lambda x:(not x['dir'],x['name'].lower()))
             return jsonify(ok=True,entries=entries,path=relative)
         p=safe_path(TAPE,relative)
         if not p.is_dir():raise ValueError('Not a directory')
-        entries=[{'name':x.name,'path':str(x.relative_to(TAPE)),'dir':x.is_dir(),'bytes':x.stat().st_size if x.is_file() else None}
-                 for x in sorted(p.iterdir(),key=lambda x:(not x.is_dir(),x.name.lower())) if not x.is_symlink()]
+        entries=[]
+        for x in sorted(p.iterdir(),key=lambda x:(not x.is_dir(),x.name.lower())):
+            if x.is_symlink():continue
+            if x.name.endswith('.tar.manifest.json') and x.with_name(x.name[:-len('.manifest.json')]).is_file():
+                continue
+            is_archive=x.is_file() and x.name.endswith('.tar') and x.with_name(x.name+'.manifest.json').is_file()
+            entries.append({'name':x.name,'path':str(x.relative_to(TAPE)),'dir':x.is_dir(),'archive':is_archive,
+                            'bytes':x.stat().st_size if x.is_file() else None})
         return jsonify(ok=True,entries=entries,path=relative)
     except (OSError,ValueError) as e:return jsonify(ok=False,error=str(e)),400
 @app.get('/api/format-info')
@@ -611,7 +637,7 @@ def read_plan(paths):
             archive_rel,member=rel.split('::',1)
             archive=safe_path(TAPE,archive_rel)
             manifest=load_manifest(archive)
-            matches=[m for m in manifest['members'] if not member or m['name']==member]
+            matches=[m for m in manifest['members'] if not member or m['name']==member or m['name'].startswith(member.rstrip('/')+'/')]
             if not matches:raise ValueError('Unknown TAR member: '+rel)
             for m in matches:
                 selected.append((archive_rel+'::'+m['name'],archive,m['size']))
