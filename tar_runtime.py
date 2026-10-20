@@ -155,6 +155,9 @@ def extract_members(tape_path, out_root, selected_names=None, callback=None):
                 if name not in selected:
                     continue
                 destination = out_root / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if any(p.is_symlink() for p in [destination.parent, *destination.parent.parents] if p != Path('/')):
+                    raise ValueError("Unsafe TAR destination directory")
                 if destination.exists() or destination.is_symlink():
                     raise FileExistsError("Restore path collision: " + str(destination))
                 digest = hashlib.sha256()
