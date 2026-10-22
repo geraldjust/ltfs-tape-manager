@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.7.5-dev'
+VERSION='1.7.6-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -209,7 +209,7 @@ def worker(kind,opts):
                 logs=container.logs(stdout=True,stderr=True).decode('utf-8','replace')
                 if result.get('StatusCode')!=0:
                     (STATE/'last-format-log.txt').write_text(logs[-30000:])
-                    raise RuntimeError('Formatting failed (exit '+str(result.get('StatusCode'))+'). See last-format-log.txt in state directory; do not retry automatically.')
+                    raise RuntimeError('Formatting failed (exit '+str(result.get('StatusCode'))+'). '+('Check whether the cartridge physical write-protect tab is locked. Write protection is one possible cause; confirm in the format log. ' if result.get('StatusCode')==16 else '')+'See last-format-log.txt in state directory; do not retry automatically.')
                 update(message='Format command completed; mounting read-only to verify')
             finally:
                 try:container.remove(force=False)
