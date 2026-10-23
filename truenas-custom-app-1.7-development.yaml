@@ -1,10 +1,10 @@
 # LTFS Tape Manager v1.7.5 DEVELOPMENT — DEVELOPMENT BUILD
 # Main TrueNAS SCALE / MAIN_Pool
-# Do not install until the 1.7.6-dev image has been built and published.
+# Do not install until the 1.7.7-dev image has been built and published.
 # Stop v1.6.9 and unmount its LTFS worker before operating this test app.
 services:
   init-state-1-7:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.6-dev
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.7-dev
     restart: "no"
     user: "0:0"
     entrypoint: ["python", "-c"]
@@ -20,7 +20,7 @@ services:
     depends_on:
       init-state-1-7:
         condition: service_completed_successfully
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.6-dev
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.7.7-dev
     container_name: ltfs-manager-1-7
     restart: unless-stopped
     privileged: true
