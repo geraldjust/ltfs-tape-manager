@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.7.6-dev'
+VERSION='1.7.7-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -464,6 +464,37 @@ def status_data():
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
+# Notes live on the persistent TrueNAS manager state volume, not on tape.
+NOTES_FILE=STATE/'user-notes.txt'
+NOTES_LOCK=threading.Lock()
+NOTES_MAX=1024*1024
+
+@app.get('/api/notes')
+def get_notes():
+    try:
+        with NOTES_LOCK:
+            content=NOTES_FILE.read_text(encoding='utf-8') if NOTES_FILE.exists() else ''
+        return jsonify(ok=True,text=content)
+    except OSError as e:return jsonify(ok=False,error='Cannot read notes: '+str(e)),500
+
+@app.post('/api/notes')
+def save_notes():
+    data=request.get_json(silent=True) or {}
+    content=data.get('text')
+    if not isinstance(content,str) or len(content.encode('utf-8'))>NOTES_MAX:
+        return jsonify(ok=False,error='Notes must be text smaller than 1 MiB'),400
+    tmp=STATE/('user-notes-'+uuid.uuid4().hex+'.tmp')
+    try:
+        with NOTES_LOCK:
+            with open(tmp,'w',encoding='utf-8') as f:
+                f.write(content);f.flush();os.fsync(f.fileno())
+            os.replace(tmp,NOTES_FILE)
+        return jsonify(ok=True,message='Notes saved')
+    except OSError as e:return jsonify(ok=False,error='Cannot save notes: '+str(e)),500
+    finally:
+        try:tmp.unlink(missing_ok=True)
+        except OSError:pass
+
 @app.get('/api/status')
 def status():return jsonify(status_data())
 
@@ -669,7 +700,7 @@ def read_plan(paths):
     return [(rel,*files[rel]) for rel in sorted(files)]
 
 # Write safety: preflight is repeated under the operation lock at start.
-def write_plan(paths,all_files=False):
+def write_plan(paths,all_files=False,ignore_ds_store=False):
     if all_files:paths=[p.name for p in SRC.iterdir() if not p.is_symlink()]
     if not isinstance(paths,list) or not paths or len(paths)>10000:raise ValueError('Select at least one file or folder')
     found={}
@@ -681,7 +712,9 @@ def write_plan(paths,all_files=False):
         elif p.is_dir():
             for f,_,size in files_under(p):found[str(f.relative_to(SRC))]=(f,size)
         else:raise ValueError('Unsupported source')
-    if not found:raise ValueError('No files in selection')
+    if ignore_ds_store:
+        found={rel:item for rel,item in found.items() if Path(rel).name.lower()!='.ds_store'}
+    if not found:raise ValueError('No files in selection after filtering')
     return [(rel,*found[rel]) for rel in sorted(found)]
 
 def aurora_exec(args,timeout=None):
@@ -706,7 +739,9 @@ def write_preview():
     if mode()!='ro':return jsonify(ok=False,error='Mount tape read-only first'),409
     try:
         data=request.get_json(silent=True) or {}
-        plan=write_plan(data.get('paths',[]),data.get('all') is True)
+        ignore_ds_store=data.get('ignore_ds_store',False)
+        if not isinstance(ignore_ds_store,bool):raise ValueError('Invalid .DS_Store option')
+        plan=write_plan(data.get('paths',[]),data.get('all') is True,ignore_ds_store)
         conflicts=write_conflicts(plan)
         st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
         return jsonify(ok=True,files=len(plan),bytes=sum(x[2] for x in plan),free=free,conflicts=conflicts,plan=[{"path":rel,"bytes":size} for rel,_,size in plan],
@@ -738,7 +773,9 @@ def write_start():
         if not isinstance(tar_enabled,bool):raise ValueError('Invalid TAR setting')
         threshold=data.get('tar_threshold_mib',16)
         max_archive=data.get('tar_max_gib',32)
-        plan=write_plan(data.get('paths',[]),data.get('all') is True)
+        ignore_ds_store=data.get('ignore_ds_store',False)
+        if not isinstance(ignore_ds_store,bool):raise ValueError('Invalid .DS_Store option')
+        plan=write_plan(data.get('paths',[]),data.get('all') is True,ignore_ds_store)
         conflicts=write_conflicts(plan)
         resolutions=data.get('resolutions',{})
         if not isinstance(resolutions,dict):raise ValueError('Invalid duplicate resolutions')
