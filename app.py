@@ -510,9 +510,17 @@ def drive_error_statistics(mount_state,active):
     # LOG SENSE read and write error counter pages. Collect only when unmounted.
     pages={'write':'0x02','read':'0x03'}
     values={}
+    previous=DRIVE_COUNTER_CACHE['data'] or {}
     for name,page in pages.items():
         result=command(['sg_logs','-p',page,SG_DEVICE],timeout=6)
-        values[name]={'available':result['ok'],'raw':result['output'][-4000:] if result['ok'] else None}
+        decoded={}
+        if result['ok']:
+            for label,field in (('Total errors corrected','recovered'),('Total uncorrected errors','unrecovered')):
+                match=re.search(re.escape(label)+r'\s*[:=]\s*(\d+)',result['output'],re.I)
+                decoded[field]=int(match.group(1)) if match else None
+        old=previous.get('pages',{}).get(name,{}).get('counters',{})
+        delta={k:(v-old[k] if isinstance(v,int) and isinstance(old.get(k),int) and v>=old[k] else None) for k,v in decoded.items()}
+        values[name]={'available':result['ok'],'counters':decoded,'delta':delta,'raw':result['output'][-4000:] if result['ok'] else None}
     snapshot={'checked_at':datetime.now(timezone.utc).isoformat(),'pages':values}
     DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
     try:
