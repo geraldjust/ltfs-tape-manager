@@ -990,7 +990,7 @@ def verify_tape_batch(wrote,offset=0,total=None):
     if not wrote:return
     all_bytes=sum(item[2] for item in wrote)
     verified_bytes=0
-    update(verify_bytes_done=0,verify_bytes_total=all_bytes,verified=0,
+    update(verify_started_at=datetime.now(timezone.utc).isoformat(),verify_bytes_done=0,verify_bytes_total=all_bytes,verified=0,
            verify_total=len(wrote),verify_current=1)
     for index,(rel,p,size,target,expected) in enumerate(wrote):
         if mode()!='ro':
@@ -1246,11 +1246,22 @@ def read_start():
         if out.exists():raise RuntimeError('Restore destination already exists')
         total=sum(size for _,_,size in plan)
         require_destination_space(total,'preflight')
+        update(verify_bytes_done=0,verify_bytes_total=total,verify_started_at=None)
         update(state='running',action='read',selection_mode='all' if data.get('all') is True else 'selected',stage='copying',verified=0,mismatches=0,verification_error='',message='Starting read-only restore',file='',done=0,total=len(plan),bytes_done=0,bytes_total=total,transfer_started_at=None,transfer_finished_at=None,finished_at=None,started_at=datetime.now(timezone.utc).isoformat(),destination=str(out))
         threading.Thread(target=read_worker,args=(plan,out),daemon=True).start()
         return jsonify(ok=True,message='Read-only restore started',destination=str(out),files=len(plan),bytes=total),202
     except Exception as e:
         lock.release();return jsonify(ok=False,error=str(e)),409
+
+def hash_restored_file(path,base,total):
+    digest=hashlib.sha256()
+    with open(path,'rb') as f:
+        while True:
+            chunk=f.read(4*1024*1024)
+            if not chunk:break
+            digest.update(chunk)
+            update(verify_bytes_done=min(total,base+f.tell()))
+    return digest.hexdigest()
 
 def read_worker(plan,out):
     try:
@@ -1261,6 +1272,8 @@ def read_worker(plan,out):
             if '::' in rel:
                 archive_groups.setdefault(str(src),[]).append(rel.split('::',1)[1])
         completed_archives=set()
+        verified_bytes=0
+        update(verify_bytes_done=0,verify_bytes_total=sum(size for _,_,size in plan),verify_started_at=None)
         for index,(rel,src,size) in enumerate(plan):
             if '::' in rel:
                 archive_rel=rel.split('::',1)[0]
@@ -1274,8 +1287,8 @@ def read_worker(plan,out):
                 update(stage='copying',file=archive_rel,
                        message='Sequentially restoring TAR members: '+archive_rel)
                 extract_members(src,target_dir,members)
-                update(done=job.get('done',0)+len(members),
-                       verified=job.get('verified',0)+len(members))
+                verified_bytes+=sum(sz for rel,_,sz in plan if rel.startswith(archive_rel+'::'))
+                update(done=job.get('done',0)+len(members),verified=job.get('verified',0)+len(members),verify_bytes_done=verified_bytes)
                 continue
             if mode()!='ro':raise RuntimeError('LTFS mount lost during restore')
             require_destination_space(sum(item[2] for item in plan[index:]),'before next file')
@@ -1295,7 +1308,8 @@ def read_worker(plan,out):
                         writer.write(chunk);source_hash.update(chunk)
                         update(bytes_done=job['bytes_done']+len(chunk))
                 update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),stage='verifying',message='Verifying restored file '+str(index+1)+'/'+str(len(plan)))
-                if hash_file(dst)!=source_hash.hexdigest():
+                update(verify_started_at=job.get('verify_started_at') or datetime.now(timezone.utc).isoformat())
+                if hash_restored_file(dst,verified_bytes,job['verify_bytes_total'])!=source_hash.hexdigest():
                     raise RuntimeError('SHA-256 destination verification failed: '+rel)
                 # The SHA-256 digest was computed while streaming tape to disk.
                 # Re-reading each tape file here forces unnecessary backhitching.
@@ -1303,7 +1317,8 @@ def read_worker(plan,out):
             except Exception:
                 # Preserve partial file for investigation; do not silently retry.
                 raise
-            update(done=index+1,verified=index+1)
+            verified_bytes+=size
+            update(done=index+1,verified=index+1,verify_bytes_done=verified_bytes)
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',state='completed',message='Restore complete: '+str(len(plan))+' files verified with SHA-256 in '+str(out),file='')
     except Exception as e:
         update(stage='failed',state='failed',verification_error=str(e),mismatches=1 if 'SHA-256' in str(e) else 0,message='Restore stopped: '+str(e))
