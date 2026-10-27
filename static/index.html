@@ -228,9 +228,10 @@ function verificationETA(j,kind){
 function showDiagnostics(d){
  const diag=d.diagnostics||{},w=diag.worker||{},link=diag.link||{};
  const grid=$('workerHealth');grid.replaceChildren();
- const items=[['CPU usage',w.cpu_percent==null?'N/A':w.cpu_percent+'%'],['Logical CPUs',w.logical_cpus??'N/A'],['Memory',w.memory_bytes==null?'N/A':fmt(w.memory_bytes)],['Processes',w.processes??'N/A'],['Restarts',w.restarts??'N/A'],['OOM killed',w.oom_killed==null?'N/A':w.oom_killed?'Yes':'No'],['Zombies',w.zombies??'Not yet measured']];
+ const items=[['CPU usage',w.cpu_percent==null?'N/A':w.cpu_percent+'%'],['Logical CPUs',w.logical_cpus??'N/A'],['Memory',w.memory_bytes==null?'N/A':fmt(w.memory_bytes)],['Processes',w.processes??'N/A'],['Restarts',w.restarts??'N/A'],['OOM killed',w.oom_killed==null?'N/A':w.oom_killed?'Yes':'No'],['Zombies',w.zombies??'Not yet measured'],['CPU throttling',w.cpu_throttling?.periods_throttled??'N/A'],['Worker uptime',w.started_at?durationLabel(Math.max(0,(Date.now()-Date.parse(w.started_at))/1000)):'N/A']];
  for(const [label,value] of items)grid.appendChild(tile(label,value));
- $('driveErrors').textContent=JSON.stringify(diag.drive_errors||{state:'unavailable'},null,2);
+ const de=diag.drive_errors||{},snap=de.snapshot||{},pages=snap.pages||{};const read=pages.read?.counters||{},write=pages.write?.counters||{};
+ $('driveErrors').textContent='Collection: '+(de.state||'unavailable')+' · Snapshot: '+(snap.checked_at||'Not available')+'\nRead recovered: '+(read.recovered??'N/A')+' · unrecovered: '+(read.unrecovered??'N/A')+'\nWrite recovered: '+(write.recovered??'N/A')+' · unrecovered: '+(write.unrecovered??'N/A')+'\nRead delta: '+JSON.stringify(pages.read?.delta||{})+'\nWrite delta: '+JSON.stringify(pages.write?.delta||{})+'\n'+JSON.stringify(pages,null,2);
  const panel=$('linkHealth');
  panel.hidden=!link.available||!['fc','sas'].includes(link.transport);
  if(!panel.hidden){
