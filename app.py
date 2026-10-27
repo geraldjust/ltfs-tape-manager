@@ -490,8 +490,38 @@ def worker_health(c):
         cpus=cpu.get('online_cpus') or len(usage.get('percpu_usage',[])) or None
         percent=round(dc/ds*cpus*100,1) if ds>0 and cpus else None
         mem=stats.get('memory_stats',{});state=c.attrs.get('State',{})
-        return {'available':True,'state':c.status,'cpu_percent':percent,'logical_cpus':cpus,'memory_bytes':mem.get('usage'),'memory_limit':mem.get('limit'),'processes':stats.get('pids_stats',{}).get('current'),'cpu_throttling':cpu.get('throttling_data',{}),'restarts':c.attrs.get('RestartCount'),'oom_killed':state.get('OOMKilled'),'started_at':state.get('StartedAt')}
+        zombie_count=None
+        try:
+            proc=c.exec_run(['ps','-eo','stat='],demux=False)
+            if proc.exit_code==0:zombie_count=sum(line.lstrip().startswith(b'Z') for line in (proc.output or b'').splitlines())
+        except Exception:pass
+        return {'available':True,'state':c.status,'cpu_percent':percent,'logical_cpus':cpus,'memory_bytes':mem.get('usage'),'memory_limit':mem.get('limit'),'processes':stats.get('pids_stats',{}).get('current'),'zombies':zombie_count,'cpu_throttling':cpu.get('throttling_data',{}),'restarts':c.attrs.get('RestartCount'),'oom_killed':state.get('OOMKilled'),'started_at':state.get('StartedAt')}
     except Exception as e:return {'available':False,'state':c.status,'reason':str(e)[:160]}
+
+DRIVE_COUNTERS=STATE/'drive-counter-snapshots.jsonl'
+DRIVE_COUNTER_CACHE={'data':None,'time':0}
+
+def drive_error_statistics(mount_state,active):
+    if active or mount_state!='unmounted':
+        prior=DRIVE_COUNTER_CACHE['data']
+        return {'state':'unavailable_while_mounted','snapshot':prior,'checked_at':prior.get('checked_at') if prior else None}
+    if DRIVE_COUNTER_CACHE['data'] and time.monotonic()-DRIVE_COUNTER_CACHE['time']<60:
+        return {'state':'cached','snapshot':DRIVE_COUNTER_CACHE['data']}
+    # LOG SENSE read and write error counter pages. Collect only when unmounted.
+    pages={'write':'0x02','read':'0x03'}
+    values={}
+    for name,page in pages.items():
+        result=command(['sg_logs','-p',page,SG_DEVICE],timeout=6)
+        values[name]={'available':result['ok'],'raw':result['output'][-4000:] if result['ok'] else None}
+    snapshot={'checked_at':datetime.now(timezone.utc).isoformat(),'pages':values}
+    DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
+    try:
+        with DRIVE_COUNTERS.open('a',encoding='utf-8') as f:f.write(json.dumps(snapshot)+'\\n')
+        if DRIVE_COUNTERS.stat().st_size>1024*1024:
+            with DRIVE_COUNTERS.open('rb') as f:f.seek(-512*1024,2);tail=f.read()
+            DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\\n')+1:])
+    except OSError:pass
+    return {'state':'fresh','snapshot':snapshot}
 
 def diagnostic_snapshot(c):
     global DIAG_LAST_WRITTEN
@@ -534,7 +564,7 @@ def status_data():
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE.get('presence_time',0)>30:
         REFRESH_CACHE['presence']=drive_presence();REFRESH_CACHE['presence_time']=time.monotonic()
     presence='inserted' if m in ('ro','rw') else REFRESH_CACHE.get('presence','unknown')
-    return dict(diagnostics=diagnostic_snapshot(c),ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
+    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active)},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
