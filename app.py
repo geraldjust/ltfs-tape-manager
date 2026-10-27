@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.8.0.1-dev'
+VERSION='1.8.0.2-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -500,36 +500,63 @@ def worker_health(c):
 
 DRIVE_COUNTERS=STATE/'drive-counter-snapshots.jsonl'
 DRIVE_COUNTER_CACHE={'data':None,'time':0}
+DRIVE_COUNTER_LOCK=threading.Lock()
 
-def drive_error_statistics(mount_state,active):
-    if active or mount_state!='unmounted':
-        prior=DRIVE_COUNTER_CACHE['data']
-        return {'state':'unavailable_while_mounted','snapshot':prior,'checked_at':prior.get('checked_at') if prior else None}
-    if DRIVE_COUNTER_CACHE['data'] and time.monotonic()-DRIVE_COUNTER_CACHE['time']<60:
-        return {'state':'cached','snapshot':DRIVE_COUNTER_CACHE['data']}
-    # LOG SENSE read and write error counter pages. Collect only when unmounted.
-    pages={'write':'0x02','read':'0x03'}
-    values={}
-    previous=DRIVE_COUNTER_CACHE['data'] or {}
-    for name,page in pages.items():
-        result=command(['sg_logs','-p',page,SG_DEVICE],timeout=6)
-        decoded={}
-        if result['ok']:
-            for label,field in (('Total errors corrected','recovered'),('Total uncorrected errors','unrecovered')):
-                match=re.search(re.escape(label)+r'\s*[:=]\s*(\d+)',result['output'],re.I)
-                decoded[field]=int(match.group(1)) if match else None
-        old=previous.get('pages',{}).get(name,{}).get('counters',{})
-        delta={k:(v-old[k] if isinstance(v,int) and isinstance(old.get(k),int) and v>=old[k] else None) for k,v in decoded.items()}
-        values[name]={'available':result['ok'],'counters':decoded,'delta':delta,'raw':result['output'][-4000:] if result['ok'] else None}
-    snapshot={'checked_at':datetime.now(timezone.utc).isoformat(),'pages':values}
-    DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
+def stored_drive_snapshot(serial):
+    """Load the latest valid baseline for this exact physical drive only."""
+    if not serial or not DRIVE_COUNTERS.exists():return None
     try:
-        with DRIVE_COUNTERS.open('a',encoding='utf-8') as f:f.write(json.dumps(snapshot)+'\n')
-        if DRIVE_COUNTERS.stat().st_size>1024*1024:
-            with DRIVE_COUNTERS.open('rb') as f:f.seek(-512*1024,2);tail=f.read()
-            DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\n')+1:])
+        with DRIVE_COUNTERS.open(encoding='utf-8') as stream:
+            for line in reversed(stream.readlines()):
+                try:
+                    item=json.loads(line)
+                    if item.get('drive_serial')==serial and item.get('pages'):return item
+                except (ValueError,TypeError):continue
     except OSError:pass
-    return {'state':'fresh','snapshot':snapshot}
+    return None
+
+def drive_error_statistics(mount_state,active,drive_serial=None):
+    with DRIVE_COUNTER_LOCK:
+        prior=DRIVE_COUNTER_CACHE['data']
+        if drive_serial and prior and prior.get('drive_serial')!=drive_serial:prior=None
+        if not prior and drive_serial:
+            prior=stored_drive_snapshot(drive_serial)
+            if prior:DRIVE_COUNTER_CACHE.update(data=prior,time=0)
+        if active or mount_state!='unmounted':
+            return {'state':'unavailable_while_mounted','snapshot':prior,'checked_at':prior.get('checked_at') if prior else None}
+        if not drive_serial:
+            return {'state':'serial_unavailable','snapshot':None,'checked_at':None}
+        if prior and time.monotonic()-DRIVE_COUNTER_CACHE['time']<60:
+            return {'state':'cached','snapshot':prior}
+        pages={'write':'0x02','read':'0x03'}
+        values={}
+        for name,page in pages.items():
+            result=command(['sg_logs','-p',page,SG_DEVICE],timeout=6)
+            decoded={}
+            if result['ok']:
+                for label,field in (('Total errors corrected','recovered'),('Total uncorrected errors','unrecovered')):
+                    match=re.search(re.escape(label)+r'\\s*[:=]\\s*(\\d+)',result['output'],re.I)
+                    decoded[field]=int(match.group(1)) if match else None
+            old=(prior or {}).get('pages',{}).get(name,{}).get('counters',{})
+            delta={}
+            resets={}
+            for key,value in decoded.items():
+                before=old.get(key)
+                resets[key]=isinstance(value,int) and isinstance(before,int) and value<before
+                delta[key]=value-before if isinstance(value,int) and isinstance(before,int) and value>=before else None
+            values[name]={'available':result['ok'],'counters':decoded,'delta':delta,'counter_reset':resets,'raw':result['output'][-4000:] if result['ok'] else None}
+        snapshot={'drive_serial':drive_serial,'checked_at':datetime.now(timezone.utc).isoformat(),'previous_checked_at':prior.get('checked_at') if prior else None,'pages':values}
+        # Only successful counter reads can replace the previous valid baseline.
+        if not any(v['available'] and any(isinstance(n,int) for n in v['counters'].values()) for v in values.values()):
+            return {'state':'read_failed','snapshot':prior,'checked_at':prior.get('checked_at') if prior else None}
+        DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
+        try:
+            with DRIVE_COUNTERS.open('a',encoding='utf-8') as stream:stream.write(json.dumps(snapshot)+'\\n')
+            if DRIVE_COUNTERS.stat().st_size>1024*1024:
+                with DRIVE_COUNTERS.open('rb') as stream:stream.seek(-512*1024,2);tail=stream.read()
+                DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\\n')+1:])
+        except OSError:pass
+        return {'state':'fresh','snapshot':snapshot}
 
 def diagnostic_snapshot(c):
     global DIAG_LAST_WRITTEN
@@ -572,7 +599,7 @@ def status_data():
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE.get('presence_time',0)>30:
         REFRESH_CACHE['presence']=drive_presence();REFRESH_CACHE['presence_time']=time.monotonic()
     presence='inserted' if m in ('ro','rw') else REFRESH_CACHE.get('presence','unknown')
-    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active)},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
+    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active,(drive.get('fields') or {}).get('Unit serial number'))},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
@@ -924,7 +951,7 @@ def write_start():
         # Freeze size and mtime: detect source changes before copying each file.
         frozen=[(rel,p,size,target,p.stat().st_mtime_ns) for rel,p,size,target in effective]
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
-               bytes_done=0,bytes_total=total,verify_bytes_done=0,verify_bytes_total=0,verify_current=0,verify_total=0,transfer_started_at=None,transfer_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
+               bytes_done=0,bytes_total=total,verify_bytes_done=0,verify_bytes_total=0,verify_current=0,verify_total=0,transfer_started_at=None,transfer_finished_at=None,commit_started_at=None,commit_finished_at=None,remount_started_at=None,remount_finished_at=None,verify_started_at=None,verify_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
         threading.Thread(target=write_worker,args=(frozen,dual_source_verify,archives),daemon=True).start()
         return jsonify(ok=True,files=len(frozen),bytes=total,message='Write started; do not interrupt or eject'),202
@@ -1231,6 +1258,7 @@ def write_worker(plan, dual_source_verify=False, archives=None):
         if mode()!='ro':raise RuntimeError('Read-only remount not confirmed')
         update(remount_finished_at=datetime.now(timezone.utc).isoformat(),stage='verifying',message='Sequential SHA-256 verification of committed tape files')
         verify_tape_batch(wrote)
+        update(verify_finished_at=datetime.now(timezone.utc).isoformat())
         if dual_source_verify:
             for archive in archives:
                 # Read the manifest through Aurora's current RO mount; /tape
