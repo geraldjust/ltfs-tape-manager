@@ -129,7 +129,7 @@ def mount_aurora(rw=False,allow_stale=False):
     cmd=['altfs','-f','-o','devname='+SG_DEVICE,'-o','noatime']
     cmd+=['-o','sync_type=unmount'] if rw else ['-o','ro']
     cmd+=['/ltfs']
-    client.containers.run(IMAGE,command=cmd,name=WORKER_NAME,detach=True,privileged=True,
+    client.containers.run(IMAGE,command=cmd,name=WORKER_NAME,detach=True,privileged=True,init=True,
         devices=[SG_DEVICE+':'+SG_DEVICE+':rwm','/dev/fuse:/dev/fuse:rwm'],
         mounts=[Mount(target='/ltfs',source=HOST_TAPE,type='bind',propagation='rshared'),
                 Mount(target='/source',source=HOST_SOURCE,type='bind',read_only=True)],
@@ -958,6 +958,9 @@ cleanup() {
   [ -z "$consumer" ] || kill "$consumer" 2>/dev/null || true
   [ -z "$hasher" ] || kill "$hasher" 2>/dev/null || true
   [ -z "$monitor_pid" ] || kill "$monitor_pid" 2>/dev/null || true
+  for child in "$monitor_pid" "$producer" "$consumer" "$hasher"; do
+    [ -z "$child" ] || wait "$child" 2>/dev/null || true
+  done
   rm -f -- "$progress_file" "$data_fifo" "$hash_fifo" "$hash_result"
 }
 trap cleanup EXIT
@@ -972,11 +975,20 @@ consumer=$!
 # Poll progress in the background; do not sleep between files.
 # The foreground waits immediately for the LTFS writer to finish.
 (
+  nap=''
+  reap_monitor_sleep() {
+    [ -z "$nap" ] || { kill "$nap" 2>/dev/null || true; wait "$nap" 2>/dev/null || true; }
+  }
+  trap reap_monitor_sleep EXIT
+  trap 'exit 0' TERM INT
   while kill -0 "$consumer" 2>/dev/null; do
     if [ -r "/proc/$consumer/io" ]; then
       awk '/^rchar:/ {print $2}' "/proc/$consumer/io" >| "$progress_file" 2>/dev/null || true
     fi
-    sleep 1
+    sleep 1 &
+    nap=$!
+    wait "$nap" || true
+    nap=''
   done
 ) &
 monitor_pid=$!
@@ -1050,7 +1062,7 @@ actual="$(stat -c %s -- "$path")"
 # approximate progress signal only; the SHA-256 result is authoritative.
 sha256sum -- "$path" &
 pid=$!
-cleanup() { kill "$pid" 2>/dev/null || true; rm -f -- "$progress"; }
+cleanup() { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f -- "$progress"; }
 trap cleanup EXIT
 while kill -0 "$pid" 2>/dev/null; do
   if [ -r "/proc/$pid/io" ]; then
