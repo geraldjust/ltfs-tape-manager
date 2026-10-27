@@ -516,10 +516,10 @@ def drive_error_statistics(mount_state,active):
     snapshot={'checked_at':datetime.now(timezone.utc).isoformat(),'pages':values}
     DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
     try:
-        with DRIVE_COUNTERS.open('a',encoding='utf-8') as f:f.write(json.dumps(snapshot)+'\\n')
+        with DRIVE_COUNTERS.open('a',encoding='utf-8') as f:f.write(json.dumps(snapshot)+'\n')
         if DRIVE_COUNTERS.stat().st_size>1024*1024:
             with DRIVE_COUNTERS.open('rb') as f:f.seek(-512*1024,2);tail=f.read()
-            DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\\n')+1:])
+            DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\n')+1:])
     except OSError:pass
     return {'state':'fresh','snapshot':snapshot}
 
