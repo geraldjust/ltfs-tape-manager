@@ -52,10 +52,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/geraldjust/ltfs-tape-manager:${{ github.ref_name == '1.7-development' && '1.8.0.0-dev' || (github.ref_name == '1.6' && '1.6.9' || '1.5.0.0') }}
+            ghcr.io/geraldjust/ltfs-tape-manager:${{ github.ref_name == '1.7-development' && '1.8.0.1-dev' || (github.ref_name == '1.6' && '1.6.9' || '1.5.0.0') }}
             ghcr.io/geraldjust/ltfs-tape-manager:${{ github.ref_name == '1.7-development' && '1.7-dev' || (github.ref_name == '1.6' && '1.6-dev' || '1.5-dev') }}
           labels: |
             org.opencontainers.image.source=https://github.com/geraldjust/ltfs-tape-manager
-            org.opencontainers.image.version=${{ github.ref_name == '1.7-development' && '1.8.0.0-dev' || (github.ref_name == '1.6' && '1.6.9' || '1.5.0.0') }}
+            org.opencontainers.image.version=${{ github.ref_name == '1.7-development' && '1.8.0.1-dev' || (github.ref_name == '1.6' && '1.6.9' || '1.5.0.0') }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
