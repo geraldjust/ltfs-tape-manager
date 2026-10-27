@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.7.8-dev'
+VERSION='1.8.0.0-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -437,6 +437,80 @@ def mounted_volume_identity(m):
                 break
     return result
 
+
+# 1.8.0.0 transport-aware, non-SCSI diagnostic sampling.
+DIAG_LOCK=threading.Lock()
+DIAG_CACHE={'time':0,'data':None,'fc':{}}
+DIAG_HISTORY=STATE/'diagnostic-history.jsonl'
+DIAG_LAST_WRITTEN=0
+
+def sysread(path):
+    try:return Path(path).read_text().strip()
+    except (OSError,ValueError):return None
+
+def transport_health():
+    try:
+        scsi=(Path('/sys/class/scsi_generic')/Path(SG_DEVICE).name/'device').resolve()
+        ident=next((x for x in scsi.parts if re.fullmatch(r'\d+:\d+:\d+:\d+',x)),None)
+        if not ident:raise ValueError('No SCSI mapping')
+        host='host'+ident.split(':')[0]
+    except (OSError,ValueError):
+        return {'transport':'unknown','available':False,'reason':'SCSI sysfs mapping unavailable'}
+    fc=Path('/sys/class/fc_host')/host
+    if fc.exists():
+        names=('invalid_tx_word_count','invalid_crc_count','loss_of_sync_count','loss_of_signal_count','link_failure_count','error_frames')
+        values={}
+        for key in names:
+            raw=sysread(fc/'statistics'/key)
+            try:values[key]=int(raw,0) if raw is not None else None
+            except ValueError:values[key]=None
+        old=DIAG_CACHE.get('fc',{})
+        delta={k:(v-old[k] if isinstance(v,int) and isinstance(old.get(k),int) and v>=old[k] else None) for k,v in values.items()}
+        DIAG_CACHE['fc']=values
+        return {'transport':'fc','available':True,'host':host,'state':sysread(fc/'port_state'),'speed':sysread(fc/'speed'),'counters':values,'delta':delta}
+    sas=Path('/sys/class/sas_host')/host
+    if sas.exists() or 'sas' in str(scsi).lower():
+        phys=[]
+        try:
+            for phy in Path('/sys/class/sas_phy').iterdir():
+                if host not in str(phy.resolve()):continue
+                phys.append({'phy':phy.name,**{key:sysread(phy/key) for key in ('negotiated_linkrate','invalid_dword_count','running_disparity_error_count','loss_of_dword_sync_count','phy_reset_problem_count')}})
+        except OSError:pass
+        return {'transport':'sas','available':True,'host':host,'phys':phys}
+    return {'transport':'other','available':False,'host':host,'reason':'No FC/SAS statistics exposed'}
+
+def worker_health(c):
+    if not c or c.status!='running':return {'available':False,'state':c.status if c else 'unavailable'}
+    try:
+        stats=c.stats(stream=False)
+        cpu=stats.get('cpu_stats',{});old=stats.get('precpu_stats',{})
+        usage=cpu.get('cpu_usage',{});oldusage=old.get('cpu_usage',{})
+        dc=usage.get('total_usage',0)-oldusage.get('total_usage',0)
+        ds=cpu.get('system_cpu_usage',0)-old.get('system_cpu_usage',0)
+        cpus=cpu.get('online_cpus') or len(usage.get('percpu_usage',[])) or None
+        percent=round(dc/ds*cpus*100,1) if ds>0 and cpus else None
+        mem=stats.get('memory_stats',{});state=c.attrs.get('State',{})
+        return {'available':True,'state':c.status,'cpu_percent':percent,'logical_cpus':cpus,'memory_bytes':mem.get('usage'),'memory_limit':mem.get('limit'),'processes':stats.get('pids_stats',{}).get('current'),'cpu_throttling':cpu.get('throttling_data',{}),'restarts':c.attrs.get('RestartCount'),'oom_killed':state.get('OOMKilled'),'started_at':state.get('StartedAt')}
+    except Exception as e:return {'available':False,'state':c.status,'reason':str(e)[:160]}
+
+def diagnostic_snapshot(c):
+    global DIAG_LAST_WRITTEN
+    with DIAG_LOCK:
+        now=time.monotonic()
+        if DIAG_CACHE['data'] and now-DIAG_CACHE['time']<5:return DIAG_CACHE['data']
+        result={'worker':worker_health(c),'link':transport_health(),'checked_at':datetime.now(timezone.utc).isoformat()}
+        DIAG_CACHE.update(time=now,data=result)
+        if now-DIAG_LAST_WRITTEN>=60:
+            DIAG_LAST_WRITTEN=now
+            try:
+                if DIAG_HISTORY.exists() and DIAG_HISTORY.stat().st_size>2*1024*1024:
+                    with DIAG_HISTORY.open('rb') as f:
+                        f.seek(-1024*1024,2);tail=f.read()
+                    DIAG_HISTORY.write_bytes(tail[tail.find(b'\n')+1:])
+                with DIAG_HISTORY.open('a',encoding='utf-8') as f:f.write(json.dumps(result,separators=(',',':'))+'\n')
+            except OSError:pass
+        return result
+
 def status_data():
     m=mode();capacity={}
     if m=='ro' and not lock.locked() and job.get('state')!='running':
@@ -460,7 +534,7 @@ def status_data():
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE.get('presence_time',0)>30:
         REFRESH_CACHE['presence']=drive_presence();REFRESH_CACHE['presence_time']=time.monotonic()
     presence='inserted' if m in ('ro','rw') else REFRESH_CACHE.get('presence','unknown')
-    return dict(ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
+    return dict(diagnostics=diagnostic_snapshot(c),ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
