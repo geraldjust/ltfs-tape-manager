@@ -933,13 +933,20 @@ def copy_to_tape_with_progress(src, dst, base_bytes, file_size):
     progress='/tmp/ltfs-write-progress-'+token
     finished=threading.Event()
     def monitor():
-        last=0
+        last=0;last_change=time.monotonic();last_poll=last_change;stalled=False
         while not finished.wait(2):
             try:
                 raw=aurora_exec(['cat',progress]).strip()
                 current=min(file_size,max(last,int(raw)))
-                last=current
-                update(bytes_done=base_bytes+current)
+                now=time.monotonic()
+                if current>last:
+                    if stalled:update(write_stall_seconds=round(now-last_change,1),write_stall_active=False)
+                    stalled=False;last_change=now
+                elif now-last_change>=15 and not stalled:
+                    stalled=True;update(write_stall_active=True,write_stall_started_at=datetime.now(timezone.utc).isoformat())
+                rate=(current-last)/max(.01,now-last_poll)
+                last=current;last_poll=now
+                update(bytes_done=base_bytes+current,write_stream_bytes_per_sec=max(0,round(rate)),write_stall_active=stalled)
             except (ValueError,RuntimeError,IndexError):
                 pass
     script='''set -eu
@@ -1208,13 +1215,13 @@ def write_worker(plan, dual_source_verify=False, archives=None):
             manifest=write_tar_in_aurora(archive,entries,sum(x[2] for x in wrote))
             wrote.append((target,entries[0][1],manifest['archive_size'],target,manifest['archive_sha256']))
             update(done=len(direct)+sum(len(a['members']) for a in archives[:index+1]))
-        update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),
+        update(transfer_finished_at=datetime.now(timezone.utc).isoformat(),commit_started_at=datetime.now(timezone.utc).isoformat(),
                stage='committing',message='Committing LTFS index; do not interrupt')
         stop_aurora()
-        update(stage='remounting',message='Mounting tape read-only for independent verification')
+        update(commit_finished_at=datetime.now(timezone.utc).isoformat(),remount_started_at=datetime.now(timezone.utc).isoformat(),stage='remounting',message='Mounting tape read-only for independent verification')
         mount_aurora(False,allow_stale=True)
         if mode()!='ro':raise RuntimeError('Read-only remount not confirmed')
-        update(stage='verifying',message='Sequential SHA-256 verification of committed tape files')
+        update(remount_finished_at=datetime.now(timezone.utc).isoformat(),stage='verifying',message='Sequential SHA-256 verification of committed tape files')
         verify_tape_batch(wrote)
         if dual_source_verify:
             for archive in archives:
