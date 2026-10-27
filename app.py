@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.8.0.0-dev'
+VERSION='1.8.0.1-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -562,8 +562,8 @@ def status_data():
     drive=cached_drive() if active or m!='unmounted' else (inquiry() if time.monotonic()-REFRESH_CACHE['time']>30 else cached_drive())
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE['time']>30:REFRESH_CACHE['time']=time.monotonic()
     if active or m!='unmounted':drive['source']='last_known' if drive.get('fields') else 'unavailable'
-    temperature=drive_temperature() if not active else (TEMPERATURE_CACHE['data'] or {'celsius':None,'source':'unavailable','checked_at':None})
-    health=HEALTH_CACHE['data'] if active else drive_health()
+    temperature=drive_temperature() if not active and m=='unmounted' else (dict(TEMPERATURE_CACHE['data'],source='cached') if TEMPERATURE_CACHE['data'] else {'celsius':None,'source':'unavailable','checked_at':None})
+    health=drive_health() if not active and m=='unmounted' else (dict(HEALTH_CACHE['data'],source='cached') if HEALTH_CACHE['data'] else None)
     if health is None:health={'cleaning':'Unknown','alerts':[],'source':'unavailable'}
     tape={'ok':False,'output':'Unavailable while LTFS is mounted or operation active'}
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE.get('tape_time',0)>30:
