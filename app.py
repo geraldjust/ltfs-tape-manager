@@ -535,7 +535,7 @@ def drive_error_statistics(mount_state,active,drive_serial=None):
             decoded={}
             if result['ok']:
                 for label,field in (('Total errors corrected','recovered'),('Total uncorrected errors','unrecovered')):
-                    match=re.search(re.escape(label)+r'\\s*[:=]\\s*(\\d+)',result['output'],re.I)
+                    match=re.search(re.escape(label)+r'\s*[:=]\s*(\d+)',result['output'],re.I)
                     decoded[field]=int(match.group(1)) if match else None
             old=(prior or {}).get('pages',{}).get(name,{}).get('counters',{})
             delta={}
@@ -551,10 +551,10 @@ def drive_error_statistics(mount_state,active,drive_serial=None):
             return {'state':'read_failed','snapshot':prior,'checked_at':prior.get('checked_at') if prior else None}
         DRIVE_COUNTER_CACHE.update(data=snapshot,time=time.monotonic())
         try:
-            with DRIVE_COUNTERS.open('a',encoding='utf-8') as stream:stream.write(json.dumps(snapshot)+'\\n')
+            with DRIVE_COUNTERS.open('a',encoding='utf-8') as stream:stream.write(json.dumps(snapshot)+'\n')
             if DRIVE_COUNTERS.stat().st_size>1024*1024:
                 with DRIVE_COUNTERS.open('rb') as stream:stream.seek(-512*1024,2);tail=stream.read()
-                DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\\n')+1:])
+                DRIVE_COUNTERS.write_bytes(tail[tail.find(b'\n')+1:])
         except OSError:pass
         return {'state':'fresh','snapshot':snapshot}
 
