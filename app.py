@@ -391,8 +391,12 @@ def drive_presence_detail():
     # Linux mt can exit successfully with no cartridge: DR_OPEN is the
     # MT_ST_DR_OPEN status bit. Never equate command success with media loaded.
     # Parse the named status flags, not numeric status words or IM_REP_EN.
-    status_flags=re.search(r'(?im)^\\s*general status bits on\\s*\\([^)]*\\)\\s*:\\s*\\n\\s*([^\\n]*)',mt.get('output') or '')
-    flags=set(status_flags.group(1).upper().split()) if status_flags else set()
+    mt_lines=(mt.get('output') or '').splitlines()
+    flags=set()
+    for i,line in enumerate(mt_lines):
+        if 'general status bits on' in line.lower() and i+1<len(mt_lines):
+            flags=set(mt_lines[i+1].upper().split())
+            break
     if 'DR_OPEN' in flags:
         return {'state':'empty','source':'mt_dr_open','mt':mt,'tur':None}
     if 'ONLINE' in flags:
