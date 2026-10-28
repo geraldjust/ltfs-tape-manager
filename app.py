@@ -388,10 +388,17 @@ def drive_presence_detail():
             'medium absent','no cartridge','asc=0x3a','asc=3a')
     if any(token in mt_raw for token in absent):
         return {'state':'empty','source':'mt_explicit_absence','mt':mt,'tur':None}
-    # A successful mt status generally confirms a loaded cartridge. A failed
-    # mt query alone cannot distinguish loading from a transport error.
-    if mt.get('ok'):
-        return {'state':'inserted','source':'mt_status','mt':mt,'tur':None}
+    # Linux mt can exit successfully with no cartridge: DR_OPEN is the
+    # MT_ST_DR_OPEN status bit. Never equate command success with media loaded.
+    # Parse the named status flags, not numeric status words or IM_REP_EN.
+    status_flags=re.search(r'(?im)^\\s*general status bits on\\s*\\([^)]*\\)\\s*:\\s*\\n\\s*([^\\n]*)',mt.get('output') or '')
+    flags=set(status_flags.group(1).upper().split()) if status_flags else set()
+    if 'DR_OPEN' in flags:
+        return {'state':'empty','source':'mt_dr_open','mt':mt,'tur':None}
+    if 'ONLINE' in flags:
+        return {'state':'inserted','source':'mt_online','mt':mt,'tur':None}
+    # Successful mt status alone does not establish cartridge presence.
+    # Continue with SCSI TUR; if pass-through fails, report unknown.
     tur=command(['sg_turs',SG_DEVICE],timeout=10)
     raw=(tur.get('output') or '').lower()
     if any(token in raw for token in absent):
