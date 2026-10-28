@@ -24,7 +24,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.8.0.2-dev'
+VERSION='1.8.0.3-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -374,19 +374,40 @@ def mount_failure():
     try:return json.loads(LAST_MOUNT_FAILURE.read_text())
     except (OSError,ValueError):return {}
 
+def drive_presence_detail():
+    """Transport-independent cartridge detection for SAS and Fibre Channel.
+
+    A failed probe is not proof of an empty or loaded cartridge.  Prefer explicit
+    medium-absent sense/status over generic NOT READY, and never probe mounted LTFS.
+    """
+    if mode() in ('ro','rw'):
+        return {'state':'inserted','source':'ltfs_mount','mt':None,'tur':None}
+    mt=command(['mt','-f',NST_DEVICE,'status'],timeout=12)
+    mt_raw=(mt.get('output') or '').lower()
+    absent=('no medium','no tape','medium not present','medium not loaded',
+            'medium absent','no cartridge','asc=0x3a','asc=3a')
+    if any(token in mt_raw for token in absent):
+        return {'state':'empty','source':'mt_explicit_absence','mt':mt,'tur':None}
+    # A successful mt status generally confirms a loaded cartridge. A failed
+    # mt query alone cannot distinguish loading from a transport error.
+    if mt.get('ok'):
+        return {'state':'inserted','source':'mt_status','mt':mt,'tur':None}
+    tur=command(['sg_turs',SG_DEVICE],timeout=10)
+    raw=(tur.get('output') or '').lower()
+    if any(token in raw for token in absent):
+        state='empty';source='tur_explicit_absence'
+    elif tur.get('ok'):
+        state='inserted';source='tur_ready'
+    elif any(token in raw for token in ('becoming ready','in progress of becoming ready',
+                                         'initializing command required','medium removal prevented',
+                                         'not ready','logical unit not ready')):
+        state='loading';source='tur_not_ready'
+    else:
+        state='unknown';source='probe_inconclusive'
+    return {'state':state,'source':source,'mt':mt,'tur':tur}
+
 def drive_presence():
-    # Readiness via TEST UNIT READY; mt status bitfields vary across drivers.
-    # Drive responding does not mean a cartridge is present.
-    result=command(['mt','-f',NST_DEVICE,'status'],timeout=12)
-    output=(result.get('output','') or '').lower()
-    if any(x in output for x in ('medium not present','medium not loaded','no medium','no tape','not ready')):return 'empty'
-    if mode() in ('ro','rw'):return 'inserted'
-    # A failed readiness query must not be misreported as inserted.
-    turs=command(['sg_turs',SG_DEVICE],timeout=10)
-    raw=(turs.get('output','') or '').lower()
-    if any(x in raw for x in ('medium not present','no medium','medium not loaded','not ready','asc=0x3a','asc=3a','logical unit not ready')):return 'empty'
-    if turs.get('ok'):return 'inserted'
-    return 'unknown'
+    return drive_presence_detail()['state']
 
 def system_state(m,active,presence):
     action=job.get('action','')
@@ -399,11 +420,12 @@ def system_state(m,active,presence):
         if action=='mount_ro':return 'Tape inserted — Mounting LTFS'
     if m in ('ro','rw'):return 'Tape inserted — LTFS mounted'
     if presence=='empty':return 'Drive ready — No tape'
+    if presence=='loading':return 'Drive loading / becoming ready — Cartridge status not confirmed'
     if presence=='inserted':
         failure=mount_failure().get('message','').lower()
         if 'end-of-data' in failure or 'eod' in failure:return 'Tape inserted — LTFS format unconfirmed (mount failed)'
         return 'Tape inserted — LTFS format not yet checked (unmounted)'
-    return 'Drive not ready'
+    return 'Cartridge status unknown — Drive not ready or probe unavailable'
 
 def mounted_volume_identity(m):
     """Only report identity when confirmed from the currently running LTFS mount.
@@ -597,9 +619,11 @@ def status_data():
         REFRESH_CACHE['tape']=command(['mt','-f',NST_DEVICE,'status']);REFRESH_CACHE['tape_time']=time.monotonic()
     if not active and m=='unmounted':tape=REFRESH_CACHE.get('tape',tape)
     if not active and m=='unmounted' and time.monotonic()-REFRESH_CACHE.get('presence_time',0)>30:
-        REFRESH_CACHE['presence']=drive_presence();REFRESH_CACHE['presence_time']=time.monotonic()
-    presence='inserted' if m in ('ro','rw') else REFRESH_CACHE.get('presence','unknown')
-    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active,(drive.get('fields') or {}).get('Unit serial number'))},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,mount_failure=mount_failure(),
+        REFRESH_CACHE['presence_detail']=drive_presence_detail()
+        REFRESH_CACHE['presence']=REFRESH_CACHE['presence_detail']['state']
+        REFRESH_CACHE['presence_time']=time.monotonic()
+    presence='inserted' if m in ('ro','rw') else (REFRESH_CACHE.get('presence','unknown') if not active else 'unknown')
+    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active,(drive.get('fields') or {}).get('Unit serial number'))},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,presence_diagnostics=({'state':'inserted','source':'ltfs_mount'} if m in ('ro','rw') else (REFRESH_CACHE.get('presence_detail') if not active else {'state':'unknown','source':'operation_active'})),mount_failure=mount_failure(),
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
@@ -665,11 +689,12 @@ def control():
             if action=='eject':
                 r=command(['mt','-f',NST_DEVICE,'offline'],timeout=120)
                 if not r['ok']:raise RuntimeError('Eject failed: '+r['output'])
-                REFRESH_CACHE['presence']='empty'
-                REFRESH_CACHE['presence_time']=time.monotonic()
+                REFRESH_CACHE['presence']='unknown'
+                REFRESH_CACHE['presence_detail']={'state':'unknown','source':'eject_completed_pending_recheck'}
+                REFRESH_CACHE['presence_time']=0
             if mounts():restart_gui_later()
         update(state='idle',action='',message='Ready')
-        if action!='eject':REFRESH_CACHE['presence_time']=0
+        REFRESH_CACHE['presence_time']=0
         return jsonify(ok=True,message={'mount_ro':'Mounted LTFS read-only',
             'unmount':'Unmounted LTFS (refreshing mount namespace if needed)',
             'eject':'Eject command completed (refreshing mount namespace if needed)'}[action])
@@ -770,8 +795,8 @@ def format_info():
     if lock.locked():return jsonify(ok=False,error='Tape operation in progress'),409
     if mode()!='unmounted':
         return jsonify(ok=True,presence='inserted',mount=mode(),warning='Tape is mounted. Unmount before formatting.',mount_failure=mount_failure())
-    presence=drive_presence()
-    return jsonify(ok=True,presence=presence,mount='unmounted',mount_failure=mount_failure(),
+    detail=drive_presence_detail()
+    return jsonify(ok=True,presence=detail['state'],presence_diagnostics=detail,mount='unmounted',mount_failure=mount_failure(),
         warning='Cartridge data and existing LTFS identity cannot be guaranteed from this check. Formatting destroys all tape contents.')
 
 @app.post('/api/format')
