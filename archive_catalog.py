@@ -98,3 +98,12 @@ class ArchiveCatalog:
                 raise KeyError("Active library not found")
         # Intentionally never unlink/rmdir or remove tape registrations.
         return True
+
+    def set_master_path(self, ident, path):
+        with self.connect() as db:
+            result=db.execute(
+                "UPDATE libraries SET master_path=?,updated_at=? WHERE id=? AND active=1",
+                (path,utcnow(),ident))
+            if not result.rowcount:
+                raise KeyError("Active library not found")
+        return path
