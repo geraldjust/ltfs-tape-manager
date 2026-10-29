@@ -323,7 +323,7 @@ async function formatTape(){let label=$('label').value.trim();let tape_serial=$(
 
 
 
-let archiveNewFiles=[],archiveNewSelected=new Set(),archiveScanLibrary=null,archiveScanComplete=false;
+let archiveNewFiles=[],archiveNewSelected=new Set(),archiveScanLibrary=null,archiveScanComplete=false,archiveWriteSourceRoot=null;
 function archiveUpdateNewSelection(){
  const chosen=archiveNewFiles.filter(f=>archiveNewSelected.has(f.path));
  $('archiveWriteSelectionSummary').textContent=chosen.length+' of '+archiveNewFiles.length+' displayed New files selected · '+fmt(chosen.reduce((n,f)=>n+f.size_bytes,0));
@@ -337,7 +337,8 @@ async function archivePrepareWrite(){
  if(!files.length){alert('Select at least one New file.');return}
  const lib=archiveItems.find(x=>x.id===archiveSelected);
  if(!lib?.master_path){alert('Select a Master Dataset first.');return}
- const root='/mnt/Pool1/LTFS-WRITE';
+ const root=archiveWriteSourceRoot;
+ if(!root){alert('Missing write-source configuration. Scan again.');return}
  if(lib.master_path!==root&&!lib.master_path.startsWith(root+'/')){alert('The Master Dataset is not under the configured write-source root.');return}
  const prefix=lib.master_path.slice(root.length).replace(/^\\/+|\\/+$/g,'');
  const paths=files.map(f=>[prefix,f.path].filter(Boolean).join('/'));
@@ -359,7 +360,7 @@ async function archiveScanMaster(){
   $('archiveScanSummary').textContent='Archived: '+d.counts.archived+' · New: '+d.counts.new+' · Modified: '+d.counts.modified+' · Metadata mismatch: 0 · Total: '+d.total+(d.truncated?' (results limited to 3,000)':'');
   const area=$('archiveScanResults');
   const newFiles=d.files.filter(f=>f.status==='new');
-  archiveNewFiles=newFiles;archiveNewSelected=new Set(newFiles.map(f=>f.path));archiveScanLibrary=selected;archiveScanComplete=!d.truncated;
+  archiveNewFiles=newFiles;archiveNewSelected=new Set(newFiles.map(f=>f.path));archiveScanLibrary=selected;archiveScanComplete=!d.truncated;archiveWriteSourceRoot=d.write_source_root;
   for(const f of newFiles){
    const p=document.createElement('div');
    p.textContent='+ NEW · '+f.path+' · '+(f.size_bytes/1e9).toFixed(3)+' GB';
