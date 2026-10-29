@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends mt-st sg3-utils
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py archive_catalog.py archive_registration.py tar_planning.py tar_runtime.py ./
+COPY app.py archive_catalog.py archive_registration.py archive_scan.py tar_planning.py tar_runtime.py ./
 COPY static ./static
 EXPOSE 8080
 CMD ["python","app.py"]
