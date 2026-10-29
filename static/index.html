@@ -339,8 +339,25 @@ async function archiveLoadTapes(){
 async function archiveRegisterTape(){
  const lib=archiveItems.find(x=>x.id===archiveSelected);
  if(!lib){alert('Select a library first');return}
- const barcode=prompt('Tape barcode (or unique manual identifier if the barcode is unavailable):');
- if(barcode===null)return;
+ let barcode=null;
+ try{
+  const response=await fetch('/api/status');
+  const status=await response.json();
+  if(status.mount!=='ro'){alert('Mount the tape read-only before registration.');return}
+  const detected=status.volume_identity?.barcode;
+  if(detected && /^[A-Za-z0-9_-]{1,32}$/.test(detected)){
+   if(confirm('Mounted LTFS tape reports barcode "'+detected+'". Use this barcode for registration?')){
+    barcode=detected;
+   }else{
+    alert('Registration cancelled. To use another identifier, resolve the mounted tape identity first.');
+    return;
+   }
+  }else{
+   barcode=prompt('No barcode was confirmed from this mounted tape. Enter a unique identifier (1–32 letters, digits, - or _):');
+   if(barcode===null)return;
+   if(!confirm('IMPORTANT: Write or attach the identifier "'+barcode+'" PHYSICALLY on the tape cartridge before continuing. Have you done this?'))return;
+  }
+ }catch(e){alert('Unable to verify the mounted tape identity: '+e.message);return}
  if(!/^[A-Za-z0-9_-]{1,32}$/.test(barcode)){alert('Use 1–32 letters, numbers, - or _');return}
  if(!confirm('Register mounted read-only LTFS tape '+barcode+' in '+lib.name+'? This creates 0-byte placeholders and metadata records, but does not write to tape.'))return;
  $('archiveMessage').textContent='Reading tape index and creating placeholders. Please wait…';
