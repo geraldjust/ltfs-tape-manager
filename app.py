@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3.3-dev'
+VERSION='1.6.0.3.4-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -339,7 +339,7 @@ def archive_verify_worker(library_id,tape_id,barcode,items,master_path):
         source=(root/master_path[len(host):].lstrip('/')).resolve(strict=True)
         if not source.is_relative_to(root):raise RuntimeError('Source path escaped mount')
         for i,item in enumerate(items):
-            if mode()!='ro' or volume_identity('ro').get('barcode')!=barcode:
+            if mode()!='ro' or mounted_volume_identity('ro').get('barcode')!=barcode:
                 raise RuntimeError('Mounted tape identity or read-only state changed')
             rel=item['source_rel']
             path=(source/rel).resolve(strict=True)
@@ -364,7 +364,7 @@ def archive_verify_worker(library_id,tape_id,barcode,items,master_path):
                 raise RuntimeError('Tape SHA-256 failed for '+rel+': '+(result.output or b'').decode('utf-8','replace')[-300:])
             tape_hash=(result.output or b'').decode('utf-8','replace').split()[0].lower()
             match=tape_hash==digest.hexdigest()
-            if mode()!='ro' or volume_identity('ro').get('barcode')!=barcode:
+            if mode()!='ro' or mounted_volume_identity('ro').get('barcode')!=barcode:
                 raise RuntimeError('Tape identity changed during verification')
             if path.stat().st_mtime_ns!=before.st_mtime_ns or path.stat().st_size!=before.st_size:
                 raise RuntimeError('Source changed during tape verification: '+rel)
@@ -407,7 +407,7 @@ def archive_verify_mismatches(library_id,tape_id):
                 WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
             if tape is None:raise ValueError('Tape not registered in active library')
             barcode=tape['barcode']
-            if volume_identity('ro').get('barcode')!=barcode:
+            if mounted_volume_identity('ro').get('barcode')!=barcode:
                 raise ValueError('Mounted tape barcode does not match selected registered tape')
             master=tape['master_path']
             host=MASTER_HOST.rstrip('/')
