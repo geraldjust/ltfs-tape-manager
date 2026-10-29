@@ -25,7 +25,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.0-dev'
+VERSION='1.6.0.1-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -225,6 +225,57 @@ def worker(kind,opts):
         if job.get('state')=='running':update(state='failed',message='Operation stopped unexpectedly')
         lock.release()
 
+
+
+# Master dataset browser is intentionally limited to the mounted read-only source.
+# No arbitrary host paths or symlink escapes are permitted.
+MASTER_ROOT=Path('/write-source')
+MASTER_HOST=os.environ.get('HOST_WRITE_PATH','/mnt/Pool1/LTFS-WRITE').rstrip('/')
+
+def master_directory(relative):
+    if not isinstance(relative,str) or relative.startswith('/') or '\\x00' in relative:
+        raise ValueError('Invalid source path')
+    parts=Path(relative).parts
+    if any(p in ('.','..') for p in parts):
+        raise ValueError('Unsafe source path')
+    root=MASTER_ROOT.resolve(strict=True)
+    path=(root/relative).resolve(strict=True)
+    if not path.is_relative_to(root) or not path.is_dir():
+        raise ValueError('Source directory is outside the allowed root')
+    return root,path
+
+@app.get('/api/archive/master/browse')
+def archive_master_browse():
+    try:
+        rel=request.args.get('path','')
+        root,path=master_directory(rel)
+        directories=[]
+        for entry in path.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            if len(directories)>=2000:
+                raise ValueError('Too many directories; narrow your selection')
+            directories.append({'name':entry.name,'path':str(entry.relative_to(root))})
+        directories.sort(key=lambda x:x['name'].casefold())
+        return jsonify(ok=True,path=str(path.relative_to(root)) if path!=root else '',
+                       host_path=MASTER_HOST+('/'+str(path.relative_to(root)) if path!=root else ''),
+                       directories=directories)
+    except (ValueError,OSError) as e:
+        return jsonify(ok=False,error=str(e)),400
+
+@app.post('/api/archive/libraries/<library_id>/master')
+def archive_set_master(library_id):
+    data=request.get_json(silent=True) or {}
+    try:
+        relative=data.get('path')
+        root,path=master_directory(relative)
+        host_path=MASTER_HOST+('/'+str(path.relative_to(root)) if path!=root else '')
+        archive_catalog().set_master_path(library_id,host_path)
+        return jsonify(ok=True,master_path=host_path)
+    except KeyError as e:
+        return jsonify(ok=False,error=str(e)),404
+    except (ValueError,OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),400
 
 # Archive library management — no tape operations are performed here.
 ARCHIVE_ROOT=Path('/archive')
