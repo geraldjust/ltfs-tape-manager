@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3.1-dev'
+VERSION='1.6.0.3.2-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -279,6 +279,27 @@ def archive_set_master(library_id):
     except (ValueError,OSError,RuntimeError) as e:
         return jsonify(ok=False,error=str(e)),400
 
+
+@app.get('/api/archive/libraries/<library_id>/tapes/<tape_id>/folders')
+def archive_tape_folders(library_id,tape_id):
+    try:
+        catalog=archive_catalog()
+        with catalog.connect() as db:
+            tape=db.execute("""SELECT t.id,t.barcode,t.source_prefix FROM tapes t
+                JOIN libraries l ON l.id=t.library_id
+                WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
+            if tape is None:return jsonify(ok=False,error='Registered tape not found'),404
+            folders={''}
+            for row in db.execute("SELECT relative_path FROM tape_files WHERE tape_id=?",(tape_id,)):
+                parts=row['relative_path'].split('/')[:-1]
+                for i in range(1,len(parts)+1):
+                    folders.add('/'.join(parts[:i]))
+                if len(folders)>200000:
+                    return jsonify(ok=False,error='Tape catalog has too many folders'),400
+            return jsonify(ok=True,barcode=tape['barcode'],source_prefix=tape['source_prefix'],
+                           folders=sorted(folders,key=lambda p:(p.count('/'),p.casefold())))
+    except (OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),400
 
 @app.post('/api/archive/libraries/<library_id>/tapes/<tape_id>/source-prefix')
 def archive_set_tape_source_prefix(library_id,tape_id):
@@ -1439,6 +1460,12 @@ def write_worker(plan, dual_source_verify=False, archives=None):
             # Do not read back the tape here: that forces backwards tape motion.
             if p.stat().st_size!=size or p.stat().st_mtime_ns!=mtime:
                 raise RuntimeError('Source changed while writing: '+rel)
+            # Preserve source mtime in the LTFS index where supported.
+            # This is metadata-only; never reread source payload or seek tape here.
+            try:
+                aurora_exec(['touch','-r',src,'--',dst])
+            except Exception as exc:
+                update(message='Wrote '+target+'; could not preserve source timestamp: '+str(exc))
             wrote.append((rel,p,size,target,streamed_hash))
             update(done=i+1,bytes_done=sum(x[2] for x in wrote))
         for index,archive in enumerate(archives):
