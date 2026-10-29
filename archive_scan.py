@@ -1,0 +1,59 @@
+"""Read-only comparison of a library's master source with registered LTFS tape metadata."""
+import os
+import stat
+from pathlib import Path
+
+MAX_FILES=200000
+MAX_RESULTS=3000
+MTIME_TOLERANCE_NS=2_000_000_000
+
+def scan_master(catalog, library_id, source_root, host_root):
+    source_root=Path(source_root).resolve(strict=True)
+    with catalog.connect() as db:
+        library=db.execute("SELECT * FROM libraries WHERE id=? AND active=1",(library_id,)).fetchone()
+        if library is None:
+            raise KeyError("Active library not found")
+        master=library["master_path"]
+        if not master:
+            raise ValueError("Select a Master Dataset directory before scanning")
+        host_root=host_root.rstrip("/")
+        if master!=host_root and not master.startswith(host_root+"/"):
+            raise ValueError("Master Dataset is outside the allowed source mount")
+        relative=master[len(host_root):].lstrip("/")
+        source=(source_root/relative).resolve(strict=True)
+        if not source.is_relative_to(source_root) or not source.is_dir():
+            raise ValueError("Master Dataset directory is unavailable or outside allowed source")
+        inventory={}
+        for row in db.execute("""SELECT f.relative_path,f.size_bytes,f.mtime_ns,t.barcode
+            FROM tape_files f JOIN tapes t ON f.tape_id=t.id
+            WHERE t.library_id=?""",(library_id,)):
+            inventory.setdefault(row["relative_path"],[]).append(row)
+    counts={"archived":0,"new":0,"modified":0}
+    samples=[]
+    scanned=0
+    for base,dirs,names in os.walk(source,topdown=True,followlinks=False):
+        parent=Path(base)
+        dirs[:]=[d for d in dirs if not (parent/d).is_symlink()]
+        for name in names:
+            p=parent/name
+            st=p.lstat()
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            scanned+=1
+            if scanned>MAX_FILES:
+                raise ValueError("Scan exceeds 200,000 files; select a smaller Master Dataset")
+            rel=p.relative_to(source).as_posix()
+            matches=inventory.get(rel,[])
+            archived=[r for r in matches if r["size_bytes"]==st.st_size and
+                r["mtime_ns"] is not None and abs(r["mtime_ns"]-st.st_mtime_ns)<=MTIME_TOLERANCE_NS]
+            status="archived" if archived else ("modified" if matches else "new")
+            counts[status]+=1
+            if len(samples)<MAX_RESULTS:
+                samples.append({"path":rel,"status":status,"size_bytes":st.st_size,
+                    "mtime_ns":st.st_mtime_ns,
+                    "tapes":[r["barcode"] for r in archived] if archived else
+                        [r["barcode"] for r in matches]})
+    samples.sort(key=lambda r:(r["status"],r["path"].casefold()))
+    return {"master_path":master,"counts":counts,"total":scanned,"files":samples,
+            "truncated":scanned>len(samples),"comparison":"size_and_mtime_2s_tolerance",
+            "note":"Metadata comparison only; no content SHA-256 verification"}
