@@ -1,10 +1,12 @@
 """Read-only comparison of a library's master source with registered LTFS tape metadata."""
 import os
 import stat
+import posixpath
 from pathlib import Path
 
 MAX_FILES=200000
 MAX_RESULTS=3000
+SKIP_NAMES={".DS_Store","Thumbs.db"}
 MTIME_TOLERANCE_NS=2_000_000_000
 
 def scan_master(catalog, library_id, source_root, host_root):
@@ -24,10 +26,16 @@ def scan_master(catalog, library_id, source_root, host_root):
         if not source.is_relative_to(source_root) or not source.is_dir():
             raise ValueError("Master Dataset directory is unavailable or outside allowed source")
         inventory={}
-        for row in db.execute("""SELECT f.relative_path,f.size_bytes,f.mtime_ns,t.barcode
+        for row in db.execute("""SELECT f.relative_path,f.size_bytes,f.mtime_ns,t.barcode,t.source_prefix
             FROM tape_files f JOIN tapes t ON f.tape_id=t.id
             WHERE t.library_id=?""",(library_id,)):
-            inventory.setdefault(row["relative_path"],[]).append(row)
+            prefix=row["source_prefix"].strip("/")
+            full=row["relative_path"]
+            if prefix:
+                if not full.startswith(prefix+"/"):
+                    continue
+                full=full[len(prefix)+1:]
+            inventory.setdefault(full,[]).append(row)
     counts={"archived":0,"new":0,"modified":0}
     samples=[]
     scanned=0
@@ -35,6 +43,8 @@ def scan_master(catalog, library_id, source_root, host_root):
         parent=Path(base)
         dirs[:]=[d for d in dirs if not (parent/d).is_symlink()]
         for name in names:
+            if name in SKIP_NAMES or name.startswith("._"):
+                continue
             p=parent/name
             st=p.lstat()
             if not stat.S_ISREG(st.st_mode):
