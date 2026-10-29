@@ -20,7 +20,7 @@ Create or choose **four** storage locations. Their names are examples, not manda
 | Write source | `/mnt/Pool1/LTFS-WRITE` | Files available to write to tape |
 | Restore destination | `/mnt/Pool1/LTFS-READ` | Where restored files are saved |
 
-**Fresh-install prerequisite:** Create all four host storage locations before installing, using the TrueNAS Datasets interface or directories inside existing datasets. In particular, `/mnt/Pool1/LTFS-Manager` must already exist: the YAML init service creates only its `simple-state-1.5` child. The other three locations (`LTFS`, `LTFS-WRITE`, `LTFS-READ`) must also exist. Substitute your actual pool name for `Pool1`. On TrueNAS datasets with restrictive NFSv4 ACLs, do not use `chmod`/`chown` to work around failures. Ensure the manager can write to the state and restore locations. If you use ordinary directories instead of datasets, you can create them with `sudo mkdir -p /mnt/Pool1/{LTFS-Manager,LTFS,LTFS-WRITE,LTFS-READ}` after verifying `/mnt/Pool1` is your existing pool mountpoint.
+**Fresh-install prerequisite:** Create all four host storage locations before installing, using the TrueNAS Datasets interface or directories inside existing datasets. In particular, both `/mnt/Pool1/LTFS-Manager` and `/mnt/Pool1/LTFS-Manager/simple-state-1.5` must already exist. Docker validates bind mount sources before starting services; an init service cannot reliably create the source for another service during the same initial deployment. The other three locations (`LTFS`, `LTFS-WRITE`, `LTFS-READ`) must also exist. Substitute your actual pool name for `Pool1`. On TrueNAS datasets with restrictive NFSv4 ACLs, do not use `chmod`/`chown` to work around failures. Ensure the manager can write to the state and restore locations. If you use ordinary directories instead of datasets, you can create them with `sudo mkdir -p /mnt/Pool1/{LTFS-Manager/simple-state-1.5,LTFS,LTFS-WRITE,LTFS-READ}` after verifying `/mnt/Pool1` is your existing pool mountpoint.
 
 The LTFS mountpoint must be suitable for a FUSE mount. Avoid storing ordinary files in the mountpoint. Existing tape data is not erased by installing the application.
 
@@ -42,7 +42,7 @@ Here `/dev/sg2` is the **SCSI generic tape device**, not necessarily the same nu
 
 ## Install on TrueNAS SCALE
 
-1. First verify all four host directories exist, including the parent `LTFS-Manager`; the YAML cannot create a missing dataset or parent bind mount when `create_host_path: false` is set.\n2. Open [truenas-custom-app.yaml](truenas-custom-app.yaml) and copy its contents.
+1. First verify all four host directories and `/mnt/Pool1/LTFS-Manager/simple-state-1.5` exist. For example, after confirming the pool is named `Pool1`, run `sudo mkdir -p /mnt/Pool1/LTFS-Manager/simple-state-1.5`. The YAML intentionally uses `create_host_path: false` to avoid accidental directory creation and ACL changes.\n2. Open [truenas-custom-app.yaml](truenas-custom-app.yaml) and copy its contents.
 3. **Before installing**, edit the YAML to match your four storage paths. Update both the environment values and the corresponding bind-mount `source` paths:
    - `HOST_TAPE_PATH` and the bind mount targeting `/tape`
    - `HOST_WRITE_PATH` and the bind mount targeting `/write-source`
