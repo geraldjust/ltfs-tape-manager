@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3.6-dev'
+VERSION='1.6.0.4-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -330,7 +330,7 @@ def archive_set_tape_source_prefix(library_id,tape_id):
 @app.get('/api/archive/libraries/<library_id>/scan')
 def archive_scan_library(library_id):
     try:
-        return jsonify(ok=True,**scan_master(archive_catalog(),library_id,MASTER_ROOT,MASTER_HOST))
+        return jsonify(ok=True,write_source_root=MASTER_HOST,**scan_master(archive_catalog(),library_id,MASTER_ROOT,MASTER_HOST))
     except KeyError as e:
         return jsonify(ok=False,error=str(e)),404
     except (ValueError,OSError,RuntimeError) as e:
