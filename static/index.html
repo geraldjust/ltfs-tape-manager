@@ -430,6 +430,7 @@ async function archiveLoadTapes(){
  if(!archiveSelected){area.textContent='Select a library.';return}
  try{
   const d=await api('archive/libraries/'+encodeURIComponent(archiveSelected)+'/tapes');
+  archiveKnownTapes=d.tapes;
   area.replaceChildren();
   if(!d.tapes.length){area.textContent='No tapes registered yet.';return}
   for(const t of d.tapes){
