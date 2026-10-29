@@ -1,30 +1,17 @@
 # LTFS Tape Manager v1.5.0 — TrueNAS SCALE Custom App YAML
 # In TrueNAS: Apps > Discover Apps > Install via YAML.
 # Edit the four /mnt/Pool1 paths and tape device paths to match your system.
-# The init service creates simple-state-1.5 under the existing LTFS-Manager dataset.
-# It does not chmod or chown NFSv4 ACL-protected paths.
+# Before installation, create /mnt/Pool1/LTFS-Manager/simple-state-1.5
+# and the other three storage paths as directories or datasets.
+# TrueNAS/Docker validates bind sources before init containers can run.
+# Do not chmod or chown NFSv4 ACL-protected paths.
 # Install as a separate TrueNAS Custom App named ltfs-tape-manager-1-5.
 # Unmount and stop other manager versions before starting v1.5.0; never operate
 # both versions against the same physical tape drive simultaneously.
 # The manager creates/removes the Aurora LTFS worker on demand;
 # do NOT add a second permanent Aurora service.
 services:
-  init-state-1-5:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.5.0
-    restart: "no"
-    user: "0:0"
-    entrypoint: ["python", "-c"]
-    command: ["import os; os.makedirs('/state-parent/simple-state-1.5', exist_ok=True)"]
-    volumes:
-      - type: bind
-        source: /mnt/Pool1/LTFS-Manager
-        target: /state-parent
-        bind:
-          create_host_path: false
   ltfs-tape-manager-1-5:
-    depends_on:
-      init-state-1-5:
-        condition: service_completed_successfully
     image: ghcr.io/geraldjust/ltfs-tape-manager:1.5.0
     container_name: ltfs-manager-1-5
     restart: unless-stopped
@@ -54,7 +41,7 @@ services:
       - type: bind
         source: /mnt/Pool1/LTFS-READ
         target: /destination
-      # Init service creates this directory before the manager starts.
+      # Pre-create this directory on the host before installing.
       # Do not let Docker auto-create/chmod the directory.
       - type: bind
         source: /mnt/Pool1/LTFS-Manager/simple-state-1.5
