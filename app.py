@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3.5-dev'
+VERSION='1.6.0.3.6-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -326,128 +326,6 @@ def archive_set_tape_source_prefix(library_id,tape_id):
     except (OSError,RuntimeError,ValueError) as e:
         return jsonify(ok=False,error=str(e)),400
 
-
-# Independent archive verification state. Verification never writes to LTFS.
-archive_verify_state={'state':'idle','done':0,'total':0,'message':'No verification started'}
-archive_verify_lock=threading.Lock()
-
-def archive_verify_worker(library_id,tape_id,barcode,items,master_path):
-    try:
-        archive_verify_state.update(state='running',done=0,total=len(items),verified=0,mismatched=0,errors=0,message='Starting read-only SHA-256 verification')
-        root=Path(MASTER_ROOT).resolve(strict=True)
-        host=MASTER_HOST.rstrip('/')
-        source=(root/master_path[len(host):].lstrip('/')).resolve(strict=True)
-        if not source.is_relative_to(root):raise RuntimeError('Source path escaped mount')
-        for i,item in enumerate(items):
-            if mode()!='ro' or mounted_volume_identity('ro').get('barcode')!=barcode:
-                raise RuntimeError('Mounted tape identity or read-only state changed')
-            rel=item['source_rel']
-            path=(source/rel).resolve(strict=True)
-            if not path.is_relative_to(source) or not path.is_file():
-                raise RuntimeError('Unsafe or missing source file: '+rel)
-            before=path.stat()
-            if before.st_size!=item['size']:
-                raise RuntimeError('Source size changed: '+rel)
-            archive_verify_state.update(file=rel,message='Hashing master file '+str(i+1)+'/'+str(len(items)))
-            digest=hashlib.sha256()
-            with path.open('rb') as f:
-                for chunk in iter(lambda:f.read(4*1024*1024),b''):
-                    digest.update(chunk)
-            if path.stat().st_mtime_ns!=before.st_mtime_ns or path.stat().st_size!=before.st_size:
-                raise RuntimeError('Source changed during hashing: '+rel)
-            archive_verify_state.update(message='Hashing tape file '+str(i+1)+'/'+str(len(items)))
-            tape_path='/ltfs/'+item['tape_rel']
-            c=aurora()
-            if c is None:raise RuntimeError('LTFS worker unavailable')
-            result=c.exec_run(['sha256sum','--',tape_path])
-            if result.exit_code!=0:
-                raise RuntimeError('Tape SHA-256 failed for '+rel+': '+(result.output or b'').decode('utf-8','replace')[-300:])
-            tape_hash=(result.output or b'').decode('utf-8','replace').split()[0].lower()
-            match=tape_hash==digest.hexdigest()
-            if mode()!='ro' or mounted_volume_identity('ro').get('barcode')!=barcode:
-                raise RuntimeError('Tape identity changed during verification')
-            if path.stat().st_mtime_ns!=before.st_mtime_ns or path.stat().st_size!=before.st_size:
-                raise RuntimeError('Source changed during tape verification: '+rel)
-            with archive_catalog().connect() as db:
-                if match:
-                    db.execute("""UPDATE tape_files SET sha256=?,verified=1,
-                        verified_source_size=?,verified_source_mtime_ns=?,verified_at=?
-                        WHERE tape_id=? AND relative_path=? AND size_bytes=?""",
-                        (tape_hash,before.st_size,before.st_mtime_ns,datetime.now(timezone.utc).isoformat(),tape_id,item['tape_rel'],before.st_size))
-                else:
-                    db.execute("""UPDATE tape_files SET verified=0,sha256=NULL,
-                        verified_source_size=NULL,verified_source_mtime_ns=NULL,verified_at=NULL
-                        WHERE tape_id=? AND relative_path=?""",(tape_id,item['tape_rel']))
-            archive_verify_state['verified' if match else 'mismatched']+=1
-            archive_verify_state.update(done=i+1,message=('Verified: ' if match else 'CONTENT MISMATCH: ')+rel)
-        archive_verify_state.update(state='completed',message='Verification finished')
-    except Exception as e:
-        archive_verify_state.update(state='error',message=str(e),errors=archive_verify_state.get('errors',0)+1)
-    finally:
-        archive_verify_lock.release()
-        lock.release()
-
-@app.get('/api/archive/verify-status')
-def archive_verify_status():
-    return jsonify(ok=True,**dict(archive_verify_state))
-
-@app.post('/api/archive/libraries/<library_id>/tapes/<tape_id>/verify-mismatches')
-def archive_verify_mismatches(library_id,tape_id):
-    if not lock.acquire(False):
-        return jsonify(ok=False,error='Another tape operation is active'),409
-    if not archive_verify_lock.acquire(False):
-        lock.release()
-        return jsonify(ok=False,error='Verification already running'),409
-    try:
-        payload=request.get_json(silent=True) or {}
-        level=payload.get('level','mismatches')
-        selected=payload.get('paths',[])
-        if level not in ('mismatches','selected','full') or not isinstance(selected,list) or len(selected)>1000 or any(not isinstance(p,str) for p in selected):
-            raise ValueError('Invalid verification level or file selection')
-        if level=='selected' and not selected:raise ValueError('Select at least one file')
-        if job.get('state')=='running' or mode()!='ro':
-            raise ValueError('Mount the target tape read-only before verifying')
-        with archive_catalog().connect() as db:
-            tape=db.execute("""SELECT t.barcode,t.source_prefix,l.master_path FROM tapes t
-                JOIN libraries l ON l.id=t.library_id
-                WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
-            if tape is None:raise ValueError('Tape not registered in active library')
-            barcode=tape['barcode']
-            if mounted_volume_identity('ro').get('barcode')!=barcode:
-                raise ValueError('Mounted tape barcode does not match selected registered tape')
-            master=tape['master_path']
-            host=MASTER_HOST.rstrip('/')
-            if not master or (master!=host and not master.startswith(host+'/')):
-                raise ValueError('Invalid Master Dataset selection')
-            source=(Path(MASTER_ROOT).resolve(strict=True)/master[len(host):].lstrip('/')).resolve(strict=True)
-            if not source.is_relative_to(Path(MASTER_ROOT).resolve(strict=True)) or not source.is_dir():
-                raise ValueError('Master Dataset unavailable')
-            prefix=tape['source_prefix'].strip('/')
-            items=[]
-            for row in db.execute('SELECT relative_path,size_bytes,mtime_ns FROM tape_files WHERE tape_id=? ORDER BY relative_path',(tape_id,)):
-                full=row['relative_path']
-                if prefix:
-                    if not full.startswith(prefix+'/'):continue
-                    rel=full[len(prefix)+1:]
-                else:rel=full
-                if not rel or any(p in ('','.','..') for p in rel.split('/')):continue
-                path=source/rel
-                if path.is_symlink() or not path.is_file():continue
-                st=path.stat()
-                mismatch=(row['mtime_ns'] is None or abs(st.st_mtime_ns-row['mtime_ns'])>2_000_000_000)
-                eligible=(mismatch if level=='mismatches' else (rel in selected if level=='selected' else True))
-                if eligible and st.st_size==row['size_bytes']:
-                    items.append({'source_rel':rel,'tape_rel':full,'size':st.st_size})
-            if level=='selected' and len(items)!=len(set(selected)):raise ValueError('Some selected files are not on this tape or their sizes differ; no verification started')
-            if not items:raise ValueError('No eligible same-size files on this tape')
-            if len(items)>1000:raise ValueError('Verification limited to 1,000 files per run')
-        archive_verify_state.update(state='starting',done=0,total=len(items),verified=0,mismatched=0,errors=0)
-        threading.Thread(target=archive_verify_worker,args=(library_id,tape_id,barcode,items,master),daemon=True).start()
-        return jsonify(ok=True,files=len(items),message='Read-only SHA-256 verification started'),202
-    except (ValueError,OSError,RuntimeError) as e:
-        archive_verify_lock.release()
-        lock.release()
-        return jsonify(ok=False,error=str(e)),400
 
 @app.get('/api/archive/libraries/<library_id>/scan')
 def archive_scan_library(library_id):
