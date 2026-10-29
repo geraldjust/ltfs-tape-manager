@@ -296,11 +296,8 @@ def archive_set_tape_source_prefix(library_id,tape_id):
             tape=db.execute("""SELECT t.id FROM tapes t JOIN libraries l ON l.id=t.library_id
                 WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
             if tape is None:return jsonify(ok=False,error='Registered tape not found'),404
-            if prefix and not db.execute("""SELECT 1 FROM tape_files
-                WHERE tape_id=? AND relative_path LIKE ? LIMIT 1""",
-                (tape_id,prefix.replace('%','\\%').replace('_','\\_')+'/%')).fetchone():
-                # Exact path check below avoids treating arbitrary prefixes as valid.
-                paths=[r[0] for r in db.execute("SELECT relative_path FROM tape_files WHERE tape_id=?",(tape_id,))]
+            if prefix:
+                paths=(r[0] for r in db.execute("SELECT relative_path FROM tape_files WHERE tape_id=?",(tape_id,)))
                 if not any(p.startswith(prefix+'/') for p in paths):
                     return jsonify(ok=False,error='No registered tape files under this folder'),400
             db.execute("UPDATE tapes SET source_prefix=? WHERE id=?",(prefix,tape_id))
