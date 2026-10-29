@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3.4-dev'
+VERSION='1.6.0.3.5-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -399,6 +399,12 @@ def archive_verify_mismatches(library_id,tape_id):
         lock.release()
         return jsonify(ok=False,error='Verification already running'),409
     try:
+        payload=request.get_json(silent=True) or {}
+        level=payload.get('level','mismatches')
+        selected=payload.get('paths',[])
+        if level not in ('mismatches','selected','full') or not isinstance(selected,list) or len(selected)>1000 or any(not isinstance(p,str) for p in selected):
+            raise ValueError('Invalid verification level or file selection')
+        if level=='selected' and not selected:raise ValueError('Select at least one file')
         if job.get('state')=='running' or mode()!='ro':
             raise ValueError('Mount the target tape read-only before verifying')
         with archive_catalog().connect() as db:
@@ -428,9 +434,12 @@ def archive_verify_mismatches(library_id,tape_id):
                 path=source/rel
                 if path.is_symlink() or not path.is_file():continue
                 st=path.stat()
-                if st.st_size==row['size_bytes'] and (row['mtime_ns'] is None or abs(st.st_mtime_ns-row['mtime_ns'])>2_000_000_000):
+                mismatch=(row['mtime_ns'] is None or abs(st.st_mtime_ns-row['mtime_ns'])>2_000_000_000)
+                eligible=(mismatch if level=='mismatches' else (rel in selected if level=='selected' else True))
+                if eligible and st.st_size==row['size_bytes']:
                     items.append({'source_rel':rel,'tape_rel':full,'size':st.st_size})
-            if not items:raise ValueError('No timestamp-only mismatches on this tape')
+            if level=='selected' and len(items)!=len(set(selected)):raise ValueError('Some selected files are not on this tape or their sizes differ; no verification started')
+            if not items:raise ValueError('No eligible same-size files on this tape')
             if len(items)>1000:raise ValueError('Verification limited to 1,000 files per run')
         archive_verify_state.update(state='starting',done=0,total=len(items),verified=0,mismatched=0,errors=0)
         threading.Thread(target=archive_verify_worker,args=(library_id,tape_id,barcode,items,master),daemon=True).start()
