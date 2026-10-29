@@ -25,7 +25,7 @@ def scan_master(catalog, library_id, source_root, host_root):
         if not source.is_relative_to(source_root) or not source.is_dir():
             raise ValueError("Master Dataset directory is unavailable or outside allowed source")
         inventory={}
-        for row in db.execute("""SELECT f.relative_path,f.size_bytes,f.mtime_ns,t.barcode,t.source_prefix
+        for row in db.execute("""SELECT f.relative_path,f.size_bytes,f.mtime_ns,f.sha256,f.verified,t.barcode,t.source_prefix
             FROM tape_files f JOIN tapes t ON f.tape_id=t.id
             WHERE t.library_id=?""",(library_id,)):
             prefix=row["source_prefix"].strip("/")
@@ -55,6 +55,9 @@ def scan_master(catalog, library_id, source_root, host_root):
             matches=inventory.get(rel,[])
             archived=[r for r in matches if r["size_bytes"]==st.st_size and
                 r["mtime_ns"] is not None and abs(r["mtime_ns"]-st.st_mtime_ns)<=MTIME_TOLERANCE_NS]
+            # Verified hashes from a prior run alone are insufficient: source
+            # may have changed since then. Compare current source digest when
+            # verification is requested, not during a metadata-only scan.
             same_size=[r for r in matches if r["size_bytes"]==st.st_size]
             status="archived" if archived else ("metadata_mismatch" if same_size else ("modified" if matches else "new"))
             details=matches[0] if matches else None
@@ -65,6 +68,7 @@ def scan_master(catalog, library_id, source_root, host_root):
                 samples.append({"path":rel,"status":status,"size_bytes":st.st_size,
                     "mtime_ns":st.st_mtime_ns,
                     "tape_size_bytes":details["size_bytes"] if details else None,
+                    "catalog_sha256_verified":bool(details["verified"] and details["sha256"]) if details else False,
                     "tape_mtime_ns":details["mtime_ns"] if details else None,
                     "mtime_delta_seconds":round(abs(st.st_mtime_ns-details["mtime_ns"])/1e9,3) if details and details["mtime_ns"] is not None else None,
                     "tapes":[r["barcode"] for r in archived] if archived else
