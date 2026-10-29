@@ -65,6 +65,11 @@ class ArchiveCatalog:
             if "source_prefix" not in columns:
                 db.execute("ALTER TABLE tapes ADD COLUMN source_prefix TEXT NOT NULL DEFAULT ''")
 
+            file_columns={r["name"] for r in db.execute("PRAGMA table_info(tape_files)")}
+            for name,sql_type in (("verified_source_size","INTEGER"),("verified_source_mtime_ns","INTEGER"),("verified_at","TEXT")):
+                if name not in file_columns:
+                    db.execute(f"ALTER TABLE tape_files ADD COLUMN {name} {sql_type}")
+
     def list_libraries(self, include_removed=False):
         with self.connect() as db:
             sql = "SELECT * FROM libraries" + ("" if include_removed else " WHERE active=1") + " ORDER BY name COLLATE NOCASE"
