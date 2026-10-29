@@ -384,12 +384,7 @@ async function archiveSetTapePrefix(t){
  };
  controls.append(save,cancel);panel.append(heading,current,list,controls);
  area.prepend(panel);render();
- return;
- try{
-  await api('archive/libraries/'+encodeURIComponent(archiveSelected)+'/tapes/'+encodeURIComponent(t.id)+'/source-prefix',
-   {method:'POST',body:JSON.stringify({prefix})});
-  await archiveLoadTapes();
- }catch(e){alert('Mapping failed: '+e.message)}
+
 }
 async function archiveLoadTapes(){
  const area=$('archiveTapes');if(!area)return;
