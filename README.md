@@ -60,11 +60,11 @@ Here `/dev/sg2` is the **SCSI generic tape device**, not necessarily the same nu
    ```
 
    This snippet shows only the settings to change; keep the rest of the supplied YAML intact.
-4. Optionally change the web port in `ports:` (default `8081:8080`; change only the host-side `8081`).
+4. Optionally change the web port in `ports:` (default `8084:8080`; change only the host-side `8084`).
 5. In TrueNAS, go to **Apps → Discover Apps → Install via YAML**, use an app name such as `ltfs-tape-manager`, paste your edited YAML, and install.
-6. Open `http://YOUR-TRUENAS-IP:8081` (or your chosen host port). Confirm the drive is detected, then test mounting a known LTFS tape **read-only** before performing any write operation.
+6. Open `http://YOUR-TRUENAS-IP:8084` (or your chosen host port). Confirm the drive is detected, then test mounting a known LTFS tape **read-only** before performing any write operation.
 
-The manager image is `ghcr.io/geraldjust/ltfs-tape-manager:1.2.0.5`. It creates and removes the Aurora LTFS worker container on demand; do **not** define a second permanent Aurora worker service in the YAML.
+The stable 1.5.0 manager image is `ghcr.io/geraldjust/ltfs-tape-manager:1.5.0`. It creates and removes the Aurora LTFS worker container on demand; do **not** define a second permanent Aurora worker service in the YAML.
 
 **Safety:** Mounting an existing tape read-only is a useful first test. Formatting a tape destroys its previous LTFS contents; do not select Format unless that is intentional.
 
