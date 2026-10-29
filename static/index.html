@@ -340,7 +340,7 @@ async function archivePrepareWrite(){
  const root=archiveWriteSourceRoot;
  if(!root){alert('Missing write-source configuration. Scan again.');return}
  if(lib.master_path!==root&&!lib.master_path.startsWith(root+'/')){alert('The Master Dataset is not under the configured write-source root.');return}
- const prefix=lib.master_path.slice(root.length).replace(/^\\/+|\\/+$/g,'');
+ const prefix=lib.master_path.slice(root.length).split('/').filter(Boolean).join('/');
  const paths=files.map(f=>[prefix,f.path].filter(Boolean).join('/'));
  if(paths.length>10000){alert('Too many files for one write.');return}
  if(!confirm('Prepare '+files.length+' New file(s), '+fmt(files.reduce((n,f)=>n+f.size_bytes,0))+' for the existing tape write workflow? This does not start writing.'))return;
