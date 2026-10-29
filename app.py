@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
 from archive_catalog import ArchiveCatalog
+from archive_registration import register_tape
 import docker
 from docker.types import Mount
 
@@ -25,7 +26,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.1-dev'
+VERSION='1.6.0.2-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -276,6 +277,41 @@ def archive_set_master(library_id):
         return jsonify(ok=False,error=str(e)),404
     except (ValueError,OSError,RuntimeError) as e:
         return jsonify(ok=False,error=str(e)),400
+
+
+@app.get('/api/archive/libraries/<library_id>/tapes')
+def archive_list_tapes(library_id):
+    try:
+        catalog=archive_catalog()
+        with catalog.connect() as db:
+            lib=db.execute("SELECT id FROM libraries WHERE id=? AND active=1",(library_id,)).fetchone()
+            if not lib:return jsonify(ok=False,error='Library not found'),404
+            rows=db.execute("""SELECT t.id,t.barcode,t.registered_at,
+                COUNT(f.relative_path) AS files,COALESCE(SUM(f.size_bytes),0) AS original_bytes
+                FROM tapes t LEFT JOIN tape_files f ON f.tape_id=t.id
+                WHERE t.library_id=? GROUP BY t.id ORDER BY t.registered_at DESC""",(library_id,)).fetchall()
+            return jsonify(ok=True,tapes=[dict(r) for r in rows])
+    except (OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),503
+
+@app.post('/api/archive/libraries/<library_id>/register-tape')
+def archive_register_tape(library_id):
+    data=request.get_json(silent=True) or {}
+    if data.get('confirm') is not True:
+        return jsonify(ok=False,error='Explicit confirmation required'),400
+    if not lock.acquire(blocking=False):
+        return jsonify(ok=False,error='Another tape operation is active'),409
+    try:
+        if job.get('state')=='running' or mode()!='ro':
+            return jsonify(ok=False,error='Mount tape read-only before registration'),409
+        result=register_tape(archive_catalog(),library_id,data.get('barcode'),TAPE)
+        return jsonify(ok=True,**result)
+    except KeyError as e:
+        return jsonify(ok=False,error=str(e)),404
+    except (ValueError,OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),400
+    finally:
+        lock.release()
 
 # Archive library management — no tape operations are performed here.
 ARCHIVE_ROOT=Path('/archive')
