@@ -1,7 +1,6 @@
 """Read-only comparison of a library's master source with registered LTFS tape metadata."""
 import os
 import stat
-import posixpath
 from pathlib import Path
 
 MAX_FILES=200000
@@ -36,7 +35,7 @@ def scan_master(catalog, library_id, source_root, host_root):
                     continue
                 full=full[len(prefix)+1:]
             inventory.setdefault(full,[]).append(row)
-    counts={"archived":0,"new":0,"modified":0}
+    counts={"archived":0,"new":0,"modified":0,"metadata_mismatch":0}
     samples=[]
     scanned=0
     for base,dirs,names in os.walk(source,topdown=True,followlinks=False):
@@ -56,13 +55,20 @@ def scan_master(catalog, library_id, source_root, host_root):
             matches=inventory.get(rel,[])
             archived=[r for r in matches if r["size_bytes"]==st.st_size and
                 r["mtime_ns"] is not None and abs(r["mtime_ns"]-st.st_mtime_ns)<=MTIME_TOLERANCE_NS]
-            status="archived" if archived else ("modified" if matches else "new")
+            same_size=[r for r in matches if r["size_bytes"]==st.st_size]
+            status="archived" if archived else ("metadata_mismatch" if same_size else ("modified" if matches else "new"))
+            details=matches[0] if matches else None
+            if same_size and not archived:
+                details=same_size[0]
             counts[status]+=1
             if len(samples)<MAX_RESULTS:
                 samples.append({"path":rel,"status":status,"size_bytes":st.st_size,
                     "mtime_ns":st.st_mtime_ns,
+                    "tape_size_bytes":details["size_bytes"] if details else None,
+                    "tape_mtime_ns":details["mtime_ns"] if details else None,
+                    "mtime_delta_seconds":round(abs(st.st_mtime_ns-details["mtime_ns"])/1e9,3) if details and details["mtime_ns"] is not None else None,
                     "tapes":[r["barcode"] for r in archived] if archived else
-                        [r["barcode"] for r in matches]})
+                        [r["barcode"] for r in (same_size or matches)]})
     samples.sort(key=lambda r:(r["status"],r["path"].casefold()))
     return {"master_path":master,"counts":counts,"total":scanned,"files":samples,
             "truncated":scanned>len(samples),"comparison":"size_and_mtime_2s_tolerance",
