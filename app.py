@@ -4,6 +4,7 @@ from tar_runtime import create_archive, load_manifest, extract_members
 from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
+from archive_catalog import ArchiveCatalog
 import docker
 from docker.types import Mount
 
@@ -24,7 +25,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.5.0'
+VERSION='1.6.0.0-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -223,6 +224,46 @@ def worker(kind,opts):
     finally:
         if job.get('state')=='running':update(state='failed',message='Operation stopped unexpectedly')
         lock.release()
+
+
+# Archive library management — no tape operations are performed here.
+ARCHIVE_ROOT=Path('/archive')
+def archive_catalog():
+    return ArchiveCatalog(STATE/'archive-catalog.sqlite3', ARCHIVE_ROOT)
+
+@app.get('/api/archive/libraries')
+def archive_libraries():
+    try:
+        return jsonify(ok=True,libraries=archive_catalog().list_libraries())
+    except (OSError,RuntimeError,ValueError) as e:
+        return jsonify(ok=False,error=str(e)),503
+
+@app.post('/api/archive/libraries')
+def archive_add_library():
+    data=request.get_json(silent=True) or {}
+    name=data.get('name')
+    if not isinstance(name,str):
+        return jsonify(ok=False,error='Library name required'),400
+    try:
+        ident=archive_catalog().add_library(name)
+        return jsonify(ok=True,id=ident)
+    except ValueError as e:
+        return jsonify(ok=False,error=str(e)),400
+    except (OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),503
+
+@app.post('/api/archive/libraries/<library_id>/remove')
+def archive_remove_library(library_id):
+    data=request.get_json(silent=True) or {}
+    if data.get('confirm') is not True:
+        return jsonify(ok=False,error='Explicit confirmation required'),400
+    try:
+        archive_catalog().remove_library(library_id)
+        return jsonify(ok=True,message='Removed from management; archive files were not deleted')
+    except KeyError as e:
+        return jsonify(ok=False,error=str(e)),404
+    except (OSError,RuntimeError) as e:
+        return jsonify(ok=False,error=str(e)),503
 
 @app.get('/')
 def home():return send_from_directory('static','index.html')
