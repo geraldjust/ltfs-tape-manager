@@ -61,6 +61,9 @@ class ArchiveCatalog:
               PRIMARY KEY(tape_id,relative_path)
             );
             """)
+            columns={r["name"] for r in db.execute("PRAGMA table_info(tapes)")}
+            if "source_prefix" not in columns:
+                db.execute("ALTER TABLE tapes ADD COLUMN source_prefix TEXT NOT NULL DEFAULT ''")
 
     def list_libraries(self, include_removed=False):
         with self.connect() as db:
