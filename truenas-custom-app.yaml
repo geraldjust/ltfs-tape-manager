@@ -1,4 +1,4 @@
-# LTFS Tape Manager v1.5.0 — TrueNAS SCALE Custom App YAML
+# LTO Archive Manager v1.6.0.0-dev — TrueNAS SCALE Custom App YAML
 # TrueNAS: Apps > Discover Apps > Install via YAML.
 #
 # IMPORTANT: "Pool1" is an EXAMPLE pool name. Replace EVERY /mnt/Pool1/
@@ -6,11 +6,14 @@
 #
 # Create these paths BEFORE installing (datasets or ordinary directories):
 #   /mnt/Pool1/LTFS-Manager/
-#   /mnt/Pool1/LTFS-Manager/simple-state-1.5/
+#   /mnt/Pool1/LTFS-Manager/simple-state-1.6/
 #   /mnt/Pool1/LTFS-Manager/tape/
 #   /mnt/Pool1/LTFS-WRITE/
 #   /mnt/Pool1/LTFS-READ/
-# Both simple-state-1.5 and tape MUST be INSIDE LTFS-Manager.
+#   /mnt/Pool1/LTO-Archive/  (separate ZFS dataset, optional SMB share)
+# Do NOT share LTFS-Manager over SMB: its nested tape FUSE mount has
+# different ACL and xattr capabilities from the parent NFSv4 ZFS dataset.
+# Both simple-state-1.6 and tape MUST be INSIDE LTFS-Manager.
 # The tape directory must be empty before mounting. Do not make it a
 # separate ZFS dataset; it is an ordinary directory used as a FUSE mountpoint.
 # Docker validates bind sources before starting services; it cannot rely on
@@ -20,27 +23,33 @@
 # Confirm the tape devices with: sudo lsscsi -g
 # /dev/sg1 and /dev/nst0 below are examples; change BOTH environment
 # variables and BOTH devices entries if your drive uses different paths.
-# Install as a TrueNAS Custom App named ltfs-tape-manager-1-5.
+# Install as a TrueNAS Custom App named lto-archive-manager-1-6.
 # Stop other tape managers before using this drive. The manager creates
 # and removes its Aurora LTFS worker on demand; do not add another service.
 services:
-  ltfs-tape-manager-1-5:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.5.0
-    container_name: ltfs-manager-1-5
+  lto-archive-manager-1-6:
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.0-dev
+    container_name: lto-archive-manager-1-6
     restart: unless-stopped
     privileged: true
     ports:
       - "8084:8080"
     environment:
+      HOST_ARCHIVE_PATH: /mnt/Pool1/LTO-Archive
       HOST_TAPE_PATH: /mnt/Pool1/LTFS-Manager/tape
       HOST_WRITE_PATH: /mnt/Pool1/LTFS-WRITE
       HOST_READ_PATH: /mnt/Pool1/LTFS-READ
       SG_DEVICE: /dev/sg1
       NST_DEVICE: /dev/nst0
       AURORA_IMAGE: ghcr.io/auroratape/aurora-ltfs:1.5.0
-      LTFS_WORKER_NAME: aurora-ltfs-1-5
-      LTFS_MANAGER_NAME: ltfs-manager-1-5
+      LTFS_WORKER_NAME: aurora-ltfs-1-6
+      LTFS_MANAGER_NAME: lto-archive-manager-1-6
     volumes:
+      - type: bind
+        source: /mnt/Pool1/LTO-Archive
+        target: /archive
+        bind:
+          create_host_path: false
       - /var/run/docker.sock:/var/run/docker.sock
       - type: bind
         source: /mnt/Pool1/LTFS-Manager/tape
@@ -60,7 +69,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /mnt/Pool1/LTFS-Manager/simple-state-1.5
+        source: /mnt/Pool1/LTFS-Manager/simple-state-1.6
         target: /state-simple
         bind:
           create_host_path: false
