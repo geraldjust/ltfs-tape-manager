@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.3-dev'
+VERSION='1.6.0.3.1-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -280,6 +280,34 @@ def archive_set_master(library_id):
         return jsonify(ok=False,error=str(e)),400
 
 
+@app.post('/api/archive/libraries/<library_id>/tapes/<tape_id>/source-prefix')
+def archive_set_tape_source_prefix(library_id,tape_id):
+    data=request.get_json(silent=True) or {}
+    prefix=data.get('prefix','')
+    if not isinstance(prefix,str):
+        return jsonify(ok=False,error='Folder must be text'),400
+    prefix=prefix.strip().strip('/')
+    parts=prefix.split('/') if prefix else []
+    if any(p in ('','.','..') or '\\' in p for p in parts):
+        return jsonify(ok=False,error='Invalid tape source folder'),400
+    try:
+        catalog=archive_catalog()
+        with catalog.connect() as db:
+            tape=db.execute("""SELECT t.id FROM tapes t JOIN libraries l ON l.id=t.library_id
+                WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
+            if tape is None:return jsonify(ok=False,error='Registered tape not found'),404
+            if prefix and not db.execute("""SELECT 1 FROM tape_files
+                WHERE tape_id=? AND relative_path LIKE ? LIMIT 1""",
+                (tape_id,prefix.replace('%','\\%').replace('_','\\_')+'/%')).fetchone():
+                # Exact path check below avoids treating arbitrary prefixes as valid.
+                paths=[r[0] for r in db.execute("SELECT relative_path FROM tape_files WHERE tape_id=?",(tape_id,))]
+                if not any(p.startswith(prefix+'/') for p in paths):
+                    return jsonify(ok=False,error='No registered tape files under this folder'),400
+            db.execute("UPDATE tapes SET source_prefix=? WHERE id=?",(prefix,tape_id))
+        return jsonify(ok=True,prefix=prefix)
+    except (OSError,RuntimeError,ValueError) as e:
+        return jsonify(ok=False,error=str(e)),400
+
 @app.get('/api/archive/libraries/<library_id>/scan')
 def archive_scan_library(library_id):
     try:
@@ -296,7 +324,7 @@ def archive_list_tapes(library_id):
         with catalog.connect() as db:
             lib=db.execute("SELECT id FROM libraries WHERE id=? AND active=1",(library_id,)).fetchone()
             if not lib:return jsonify(ok=False,error='Library not found'),404
-            rows=db.execute("""SELECT t.id,t.barcode,t.registered_at,
+            rows=db.execute("""SELECT t.id,t.barcode,t.source_prefix,t.registered_at,
                 COUNT(f.relative_path) AS files,COALESCE(SUM(f.size_bytes),0) AS original_bytes
                 FROM tapes t LEFT JOIN tape_files f ON f.tape_id=t.id
                 WHERE t.library_id=? GROUP BY t.id ORDER BY t.registered_at DESC""",(library_id,)).fetchall()
