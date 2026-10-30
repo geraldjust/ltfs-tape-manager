@@ -28,7 +28,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.5-dev'
+VERSION='1.6.0.5.1-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -379,13 +379,35 @@ def archive_list_tapes(library_id):
         with catalog.connect() as db:
             lib=db.execute("SELECT id FROM libraries WHERE id=? AND active=1",(library_id,)).fetchone()
             if not lib:return jsonify(ok=False,error='Library not found'),404
-            rows=db.execute("""SELECT t.id,t.barcode,t.source_prefix,t.registered_at,
+            rows=db.execute("""SELECT t.id,t.barcode,t.source_prefix,t.registered_at,t.active,
                 COUNT(f.relative_path) AS files,COALESCE(SUM(f.size_bytes),0) AS original_bytes
                 FROM tapes t LEFT JOIN tape_files f ON f.tape_id=t.id
                 WHERE t.library_id=? GROUP BY t.id ORDER BY t.registered_at DESC""",(library_id,)).fetchall()
             return jsonify(ok=True,tapes=[dict(r) for r in rows])
     except (OSError,RuntimeError) as e:
         return jsonify(ok=False,error=str(e)),503
+
+@app.post('/api/archive/libraries/<library_id>/tapes/<tape_id>/registration')
+def archive_toggle_tape_registration(library_id,tape_id):
+    data=request.get_json(silent=True) or {}
+    if data.get('confirm') is not True or type(data.get('active')) is not bool:
+        return jsonify(ok=False,error='Explicit registration choice and confirmation required'),400
+    if not lock.acquire(blocking=False):
+        return jsonify(ok=False,error='Tape operation in progress'),409
+    try:
+        if job.get('state')=='running':
+            return jsonify(ok=False,error='Tape operation in progress'),409
+        with archive_catalog().connect() as db:
+            tape=db.execute("""SELECT t.id,t.barcode,t.active FROM tapes t JOIN libraries l ON l.id=t.library_id
+                WHERE t.id=? AND t.library_id=? AND l.active=1""",(tape_id,library_id)).fetchone()
+            if tape is None:return jsonify(ok=False,error='Tape registration not found'),404
+            db.execute("UPDATE tapes SET active=? WHERE id=?",(int(data['active']),tape_id))
+        return jsonify(ok=True,barcode=tape['barcode'],active=data['active'],
+                       message='Registration updated. Tape and catalog placeholders were not modified.')
+    except (OSError,RuntimeError,ValueError) as e:
+        return jsonify(ok=False,error=str(e)),400
+    finally:
+        lock.release()
 
 @app.post('/api/archive/libraries/<library_id>/register-tape')
 def archive_register_tape(library_id):
