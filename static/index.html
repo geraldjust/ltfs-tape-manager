@@ -329,7 +329,13 @@ function archiveUpdateNewSelection(){
  $('archiveWriteSelectionSummary').textContent=chosen.length+' of '+archiveNewFiles.length+' displayed New files selected · '+fmt(chosen.reduce((n,f)=>n+f.size_bytes,0));
  document.querySelectorAll('.archiveNewCheck').forEach(c=>c.checked=archiveNewSelected.has(c.value));
 }
-function archiveSelectAllNew(){archiveNewSelected=new Set(archiveNewFiles.map(f=>f.path));archiveUpdateNewSelection()}
+function archiveSelectAllNew(){
+ if(!archiveCapacity){alert('Tape capacity unavailable. Scan again.');return}
+ if(archiveCapacity.manual_required){alert('Tape is at or above 90% full. Select files individually.');return}
+ archiveNewSelected.clear();let remaining=archiveCapacity.limit_bytes;
+ for(const f of archiveNewFiles){if(f.size_bytes<=remaining){archiveNewSelected.add(f.path);remaining-=f.size_bytes}}
+ archiveUpdateNewSelection();
+}
 function archiveClearNew(){archiveNewSelected.clear();archiveUpdateNewSelection()}
 async function archivePrepareWrite(){
  if(!archiveScanComplete||archiveScanLibrary!==archiveSelected){alert('Run a fresh Master Dataset scan first.');return}
@@ -366,8 +372,8 @@ async function archiveScanMaster(){
   $('archiveScanSummary').textContent='Archived: '+d.counts.archived+' · New: '+d.counts.new+' · Modified: '+d.counts.modified+' · Metadata mismatch: 0 · Total: '+d.total+(d.truncated?' (results limited to 3,000)':'');
   const area=$('archiveScanResults');
   const newFiles=d.files.filter(f=>f.status==='new');
-  archiveNewFiles=newFiles;archiveNewSelected=new Set(newFiles.map(f=>f.path));archiveScanLibrary=selected;archiveScanComplete=!d.truncated;archiveWriteSourceRoot=d.write_source_root;
-  try{archiveCapacity=await api('archive/write-capacity');if(archiveCapacity.manual_required){archiveNewSelected.clear();$('archiveWriteSelectionSummary').textContent='Tape is '+archiveCapacity.percent_used.toFixed(1)+'% full: manually select files (safe additional '+fmt(archiveCapacity.limit_bytes)+').';}else if(newFiles.reduce((n,f)=>n+f.size_bytes,0)>archiveCapacity.limit_bytes){archiveNewSelected.clear();$('archiveWriteSelectionSummary').textContent='New files exceed the 90% fill limit. Manually select a fitting subset (max '+fmt(archiveCapacity.limit_bytes)+').';}}catch(e){archiveNewSelected.clear();archiveScanComplete=false;$('archiveWriteSelectionSummary').textContent='Capacity unavailable: '+e.message;}
+  archiveNewFiles=newFiles;archiveNewSelected=new Set();archiveScanLibrary=selected;archiveScanComplete=!d.truncated;archiveWriteSourceRoot=d.write_source_root;
+  try{archiveCapacity=await api('archive/write-capacity');if(!archiveCapacity.manual_required){let remaining=archiveCapacity.limit_bytes;for(const f of newFiles){if(f.size_bytes<=remaining){archiveNewSelected.add(f.path);remaining-=f.size_bytes}}}}catch(e){archiveNewSelected.clear();archiveScanComplete=false;$('archiveWriteSelectionSummary').textContent='Capacity unavailable: '+e.message;}
   for(const f of newFiles){
    const p=document.createElement('div');
    p.textContent='+ NEW · '+f.path+' · '+(f.size_bytes/1e9).toFixed(3)+' GB';
