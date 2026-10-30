@@ -55,9 +55,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.5.1-dev
+            ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.6-dev
           labels: |
             org.opencontainers.image.source=https://github.com/geraldjust/ltfs-tape-manager
-            org.opencontainers.image.version=1.6.0.5.1-dev
+            org.opencontainers.image.version=1.6.0.6-dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
