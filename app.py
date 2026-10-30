@@ -27,7 +27,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.4-dev'
+VERSION='1.6.0.4.1-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -1093,6 +1093,25 @@ def tape_exists(rel):
 def write_conflicts(plan):
     return [rel for rel,_,_ in plan if tape_exists(rel)]
 
+def archive_capacity_limit():
+    if mode()!='ro':raise RuntimeError('Mount LTFS read-only before archive selection')
+    st=os.statvfs(TAPE)
+    total=st.f_blocks*st.f_frsize
+    free=st.f_bavail*st.f_frsize
+    if total<=0 or free<0 or free>total:raise RuntimeError('Tape capacity unavailable or invalid')
+    used=total-free
+    threshold=total*90//100
+    reserve=1024**3
+    # Below 90%: stop at 90%. Above 90%: manual selection, keep 1 GiB reserve.
+    allowed=max(0,min(free-reserve,threshold-used)) if used<threshold else max(0,free-reserve)
+    return {'total':total,'used':used,'free':free,'percent_used':used*100/total,'limit_bytes':allowed,'manual_required':used>=threshold,'reserve_bytes':reserve}
+
+@app.get('/api/archive/write-capacity')
+def archive_write_capacity():
+    if lock.locked() or job.get('state')=='running':return jsonify(ok=False,error='Tape operation in progress'),409
+    try:return jsonify(ok=True,**archive_capacity_limit())
+    except (RuntimeError,OSError) as e:return jsonify(ok=False,error=str(e)),409
+
 @app.post('/api/write-preview')
 def write_preview():
     if lock.locked():return jsonify(ok=False,error='Tape operation in progress'),409
@@ -1169,6 +1188,9 @@ def write_start():
         total=sum(x[2] for x in effective)
         st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
         if total+1024**3>free:raise RuntimeError('Insufficient reported tape free space including 1 GiB safety margin')
+        if data.get('archive_guard') is True:
+            cap=archive_capacity_limit()
+            if total>cap['limit_bytes']:raise RuntimeError('Archive selection exceeds safe tape capacity: '+str(total)+' bytes selected, '+str(cap['limit_bytes'])+' bytes allowed')
         # Freeze size and mtime: detect source changes before copying each file.
         frozen=[(rel,p,size,target,p.stat().st_mtime_ns) for rel,p,size,target in effective]
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
