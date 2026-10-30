@@ -28,7 +28,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.4.9-dev'
+VERSION='1.6.0.4.10-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -356,7 +356,10 @@ def archive_retry_sync():
         update(archive_sync_state='completed',archive_sync_error='',archive_sync_files=result['files'])
         return jsonify(ok=True,**result)
     except (OSError,ValueError,RuntimeError,KeyError) as e:
-        update(archive_sync_state='failed',archive_sync_error=str(e))
+        if not archive_pending_path().exists():
+            update(archive_sync_state='not_applicable',archive_sync_error='')
+        else:
+            update(archive_sync_state='failed',archive_sync_error=str(e))
         return jsonify(ok=False,error=str(e)),409
     finally:lock.release()
 
