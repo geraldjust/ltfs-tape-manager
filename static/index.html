@@ -527,6 +527,7 @@ async function archiveSaveMaster(){
 let archiveItems=[],archiveSelected=null;
 async function archiveLoad(){
  const out=$('archiveLibraries'),info=$('archiveMessage');
+ try{const status=await api('status');const j=status.operation||{};const sync=j.archive_sync_state||'not_applicable';$('archiveSyncStatus').textContent=sync==='completed'?'Archive catalog synced: '+(j.archive_sync_files||0)+' verified files':sync==='failed'?'Archive catalog sync FAILED: '+(j.archive_sync_error||'Use Retry pending catalog update'):sync==='pending'?'Archive catalog update pending until tape SHA-256 verification completes.':'No recent archive-aware write catalog update.';}catch(e){$('archiveSyncStatus').textContent='Archive sync status unavailable: '+e.message}
  try{
   const d=await api('archive/libraries');archiveItems=d.libraries;
   if(!archiveItems.some(x=>x.id===archiveSelected))archiveSelected=archiveItems[0]?.id||null;
