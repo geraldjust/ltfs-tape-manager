@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from archive_catalog import ArchiveCatalog
 from archive_registration import register_tape
 from archive_scan import scan_master
+from archive_sync import sync_verified
 import docker
 from docker.types import Mount
 
@@ -27,7 +28,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.4.3-dev'
+VERSION='1.6.0.4.4-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -326,6 +327,38 @@ def archive_set_tape_source_prefix(library_id,tape_id):
     except (OSError,RuntimeError,ValueError) as e:
         return jsonify(ok=False,error=str(e)),400
 
+
+
+def archive_pending_path():return STATE/'archive-sync-pending.json'
+
+def save_archive_pending(payload):
+    path=archive_pending_path();tmp=path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(payload));os.replace(tmp,path)
+
+def apply_archive_pending():
+    path=archive_pending_path()
+    if not path.exists():raise RuntimeError('No verified archive update is pending')
+    payload=json.loads(path.read_text())
+    if mode()!='ro':raise RuntimeError('Mount the verified tape read-only before syncing')
+    actual=mounted_volume_identity('ro').get('barcode')
+    if not actual or actual!=payload['barcode']:
+        raise RuntimeError('Mounted tape barcode does not match pending archive update')
+    result=sync_verified(archive_catalog(),payload['library_id'],payload['barcode'],payload['entries'])
+    path.unlink()
+    return result
+
+@app.post('/api/archive/retry-sync')
+def archive_retry_sync():
+    if not lock.acquire(False):return jsonify(ok=False,error='Tape operation in progress'),409
+    try:
+        if job.get('state')=='running':raise RuntimeError('Tape operation in progress')
+        result=apply_archive_pending()
+        update(archive_sync_state='completed',archive_sync_error='',archive_sync_files=result['files'])
+        return jsonify(ok=True,**result)
+    except (OSError,ValueError,RuntimeError,KeyError) as e:
+        update(archive_sync_state='failed',archive_sync_error=str(e))
+        return jsonify(ok=False,error=str(e)),409
+    finally:lock.release()
 
 @app.get('/api/archive/libraries/<library_id>/scan')
 def archive_scan_library(library_id):
@@ -1188,15 +1221,27 @@ def write_start():
         total=sum(x[2] for x in effective)
         st=os.statvfs(TAPE);free=st.f_bavail*st.f_frsize
         if total+1024**3>free:raise RuntimeError('Insufficient reported tape free space including 1 GiB safety margin')
+        archive_context=None
         if data.get('archive_guard') is True:
+            if tar_enabled:raise ValueError('Disable TAR packaging for archive-aware writes until TAR catalog integration is supported')
+            library_id=data.get('archive_library_id')
+            if not isinstance(library_id,str) or not library_id:raise ValueError('Archive library ID required')
+            barcode=mounted_volume_identity('ro').get('barcode')
+            if not barcode:raise RuntimeError('Mounted tape barcode cannot be confirmed; archive sync blocked')
+            with archive_catalog().connect() as db:
+                registered=db.execute('SELECT 1 FROM tapes WHERE library_id=? AND barcode=?',(library_id,barcode)).fetchone()
+                if not registered:raise ValueError('Mounted tape is not registered in selected Archive Library')
+            if archive_pending_path().exists():raise RuntimeError('A previous archive catalog update is pending. Retry it before writing again')
+            archive_context={'library_id':library_id,'barcode':barcode}
             cap=archive_capacity_limit()
             if total>cap['limit_bytes']:raise RuntimeError('Archive selection exceeds safe tape capacity: '+str(total)+' bytes selected, '+str(cap['limit_bytes'])+' bytes allowed')
         # Freeze size and mtime: detect source changes before copying each file.
         frozen=[(rel,p,size,target,p.stat().st_mtime_ns) for rel,p,size,target in effective]
+        update(archive_sync_state='pending' if archive_context else 'not_applicable',archive_sync_error='',archive_sync_files=0)
         update(state='running',action='write',selection_mode='all' if data.get('all') is True else 'selected',stage='preparing',file='',done=0,total=len(frozen),verified=0,
                bytes_done=0,bytes_total=total,verify_bytes_done=0,verify_bytes_total=0,verify_current=0,verify_total=0,transfer_started_at=None,transfer_finished_at=None,commit_started_at=None,commit_finished_at=None,remount_started_at=None,remount_finished_at=None,verify_started_at=None,verify_finished_at=None,finished_at=None,mismatches=0,verification_error='',message='Starting guarded LTFS write',
                started_at=datetime.now(timezone.utc).isoformat())
-        threading.Thread(target=write_worker,args=(frozen,dual_source_verify,archives),daemon=True).start()
+        threading.Thread(target=write_worker,args=(frozen,dual_source_verify,archives,archive_context),daemon=True).start()
         return jsonify(ok=True,files=len(frozen),bytes=total,message='Write started; do not interrupt or eject'),202
     except Exception as e:
         lock.release();return jsonify(ok=False,error=str(e)),409
@@ -1458,7 +1503,7 @@ printf '%s %s\n' "$sha" "$size"
     update(bytes_done=min(job['bytes_total'],base_bytes+sum(e[2] for e in entries)))
     return data
 
-def write_worker(plan, dual_source_verify=False, archives=None):
+def write_worker(plan, dual_source_verify=False, archives=None, archive_context=None):
     wrote=[]
     try:
         # The plan is metadata-only; SHA-256 is computed while each file streams
@@ -1529,9 +1574,20 @@ def write_worker(plan, dual_source_verify=False, archives=None):
                 if digest!=expected:
                     raise RuntimeError('Second source SHA-256 differs from tape-verified data: '+rel)
                 update(message=f'Dual-pass source verified {i+1}/{len(wrote)}: '+rel)
+        if archive_context:
+            entries=[{'path':target,'size_bytes':size,'mtime_ns':mtime,'sha256':digest}
+                     for rel,p,size,target,mtime in plan
+                     for digest in [next((x[4] for x in wrote if x[0]==rel and x[3]==target),None)]]
+            if any(e['sha256'] is None for e in entries):raise RuntimeError('Verified tape file missing from archive sync plan')
+            save_archive_pending({**archive_context,'entries':entries})
+            try:
+                synced=apply_archive_pending()
+                update(archive_sync_state='completed',archive_sync_files=synced['files'],archive_sync_error='')
+            except Exception as sync_error:
+                update(archive_sync_state='failed',archive_sync_error=str(sync_error),message='Tape SHA-256 verified, but Archive Library sync failed: '+str(sync_error))
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
                state='completed',file='',done=len(plan),bytes_done=job['bytes_total'],
-               message=f'Write committed and SHA-256 verified: {len(wrote)} tape objects from {len(plan)} source files')
+               message=(f'Write committed and SHA-256 verified: {len(wrote)} tape objects from {len(plan)} source files' + ('; Archive Library synced' if job.get('archive_sync_state')=='completed' else '; Archive Library sync FAILED — retry required' if archive_context else ''))
     except Exception as e:
         record_mount_failure('Write failure: '+str(e))
         update(stage='failed',state='failed',verification_error=str(e),
