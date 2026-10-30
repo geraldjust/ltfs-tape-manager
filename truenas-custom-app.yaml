@@ -1,4 +1,4 @@
-# LTO Archive Manager v1.6.0.4.3-dev — TrueNAS SCALE Custom App YAML
+# LTO Archive Manager v1.6.0.4.4-dev — TrueNAS SCALE Custom App YAML
 # TrueNAS: Apps > Discover Apps > Install via YAML.
 #
 # IMPORTANT: "Pool1" is an EXAMPLE pool name. Replace EVERY /mnt/Pool1/
@@ -28,7 +28,7 @@
 # and removes its Aurora LTFS worker on demand; do not add another service.
 services:
   lto-archive-manager-1-6:
-    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.4.3-dev
+    image: ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.4.4-dev
     container_name: lto-archive-manager-1-6
     restart: unless-stopped
     privileged: true
