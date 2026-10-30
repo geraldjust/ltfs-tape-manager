@@ -34,7 +34,7 @@ jobs:
 
       - name: Validate Python and TAR tests
         run: |
-          python -m py_compile app.py archive_catalog.py archive_registration.py archive_scan.py tar_planning.py tar_runtime.py
+          python -m py_compile app.py archive_catalog.py archive_registration.py archive_scan.py archive_sync.py tar_planning.py tar_runtime.py
           python -m unittest -v test_tar_runtime.py
 
       - name: Set up Docker Buildx
@@ -55,9 +55,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.4.3-dev
+            ghcr.io/geraldjust/ltfs-tape-manager:1.6.0.4.4-dev
           labels: |
             org.opencontainers.image.source=https://github.com/geraldjust/ltfs-tape-manager
-            org.opencontainers.image.version=1.6.0.4.3-dev
+            org.opencontainers.image.version=1.6.0.4.4-dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
