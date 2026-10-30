@@ -65,6 +65,9 @@ class ArchiveCatalog:
             if "source_prefix" not in columns:
                 db.execute("ALTER TABLE tapes ADD COLUMN source_prefix TEXT NOT NULL DEFAULT ''")
 
+            if "active" not in columns:
+                db.execute("ALTER TABLE tapes ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+
             file_columns={r["name"] for r in db.execute("PRAGMA table_info(tape_files)")}
             for name,sql_type in (("verified_source_size","INTEGER"),("verified_source_mtime_ns","INTEGER"),("verified_at","TEXT")):
                 if name not in file_columns:
