@@ -28,7 +28,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.4.6-dev'
+VERSION='1.6.0.4.7-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -956,7 +956,7 @@ def estimate():
     if base==TAPE and mode()!='ro':return jsonify(ok=False,error='Tape not mounted read-only'),409
     try:
         selected=data.get('paths',[])
-        if not isinstance(selected,list) or len(selected)>10000:raise ValueError('Invalid selection')
+        if not isinstance(selected,list) or len(selected)>200000:raise ValueError('Invalid selection')
         if base==TAPE:
             plan=read_plan(selected) if selected else []
             total=sum(size for _,_,size in plan);count=len(plan)
@@ -1050,7 +1050,7 @@ def format_start():
         lock.release();return jsonify(ok=False,error=str(e)),409
 
 def read_plan(paths):
-    if not isinstance(paths,list) or not paths or len(paths)>10000:
+    if not isinstance(paths,list) or not paths or len(paths)>200000:
         raise ValueError('Select at least one file or folder')
     # Deduplicate selected descendants and preserve full paths from tape root.
     selected=[]
@@ -1095,7 +1095,7 @@ def read_plan(paths):
 # Write safety: preflight is repeated under the operation lock at start.
 def write_plan(paths,all_files=False,ignore_ds_store=False):
     if all_files:paths=[p.name for p in SRC.iterdir() if not p.is_symlink()]
-    if not isinstance(paths,list) or not paths or len(paths)>10000:raise ValueError('Select at least one file or folder')
+    if not isinstance(paths,list) or not paths or len(paths)>200000:raise ValueError('Select at least one file or folder')
     found={}
     for rel in paths:
         if not isinstance(rel,str) or not rel or rel.startswith('/') or '\\' in rel:raise ValueError('Invalid source path')
