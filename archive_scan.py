@@ -26,7 +26,7 @@ def scan_master(catalog, library_id, source_root, host_root):
         inventory={}
         for row in db.execute("""SELECT f.relative_path,f.size_bytes,t.barcode,t.source_prefix
             FROM tape_files f JOIN tapes t ON f.tape_id=t.id
-            WHERE t.library_id=?""",(library_id,)):
+            WHERE t.library_id=? AND t.active=1""",(library_id,)):
             prefix=row["source_prefix"].strip("/")
             full=row["relative_path"]
             if prefix:
