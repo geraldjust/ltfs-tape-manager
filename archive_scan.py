@@ -4,7 +4,7 @@ import stat
 from pathlib import Path
 
 MAX_FILES=200000
-MAX_RESULTS=3000
+MAX_RESULTS=200000
 SKIP_NAMES={".DS_Store","Thumbs.db"}
 
 def scan_master(catalog, library_id, source_root, host_root):
