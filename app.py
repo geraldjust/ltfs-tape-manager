@@ -1587,7 +1587,7 @@ def write_worker(plan, dual_source_verify=False, archives=None, archive_context=
                 update(archive_sync_state='failed',archive_sync_error=str(sync_error),message='Tape SHA-256 verified, but Archive Library sync failed: '+str(sync_error))
         update(finished_at=datetime.now(timezone.utc).isoformat(),stage='completed',
                state='completed',file='',done=len(plan),bytes_done=job['bytes_total'],
-               message=(f'Write committed and SHA-256 verified: {len(wrote)} tape objects from {len(plan)} source files' + ('; Archive Library synced' if job.get('archive_sync_state')=='completed' else '; Archive Library sync FAILED — retry required' if archive_context else ''))
+               message=(f'Write committed and SHA-256 verified: {len(wrote)} tape objects from {len(plan)} source files' + ('; Archive Library synced' if job.get('archive_sync_state')=='completed' else '; Archive Library sync FAILED — retry required' if archive_context else '')))
     except Exception as e:
         record_mount_failure('Write failure: '+str(e))
         update(stage='failed',state='failed',verification_error=str(e),
