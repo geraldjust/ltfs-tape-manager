@@ -26,7 +26,9 @@ Use this layout:
 
 **Both `simple-state-1.5` and `tape` MUST be created directly INSIDE `LTFS-Manager`.** They must not be created as siblings of `LTFS-Manager` under the pool root. The `tape` mountpoint should be an **ordinary empty directory**, not a separate ZFS dataset. Keep unrelated files out of it, and avoid backup/snapshot or indexing jobs traversing the mounted tape.
 
-You can create the top-level storage locations in **TrueNAS → Storage → Datasets**, or use ordinary directories inside your existing pool/datasets. Then create the two subfolders **inside `LTFS-Manager`**, either manually in the TrueNAS interface or using the shell.
+You can create the top-level storage locations in **TrueNAS → Storage → Datasets**, or use ordinary directories inside your existing pool/datasets. **For the two subfolders inside `LTFS-Manager`, the recommended method is the TrueNAS shell using `sudo mkdir -p`**, as shown below.
+
+**Important — do not SMB-share the LTFS tape mountpoint:** Do **not** create an SMB share for `/mnt/Pool1/LTFS-Manager/tape` (substitute your actual pool name), and do not expose this mountpoint through an SMB share of a parent directory. SMB share ACL configuration and inherited NFSv4 ACLs can interfere with the FUSE/LTFS mountpoint's access and permissions. Keep `tape` as an ordinary, empty, unshared directory created from the shell. If SMB access is needed, share appropriate source or restore directories instead—not the live tape mountpoint. Avoid changing ACLs, `chmod`, or `chown` on the mountpoint to troubleshoot it.
 
 For example, **only after substituting your actual pool name**, create all required directories with:
 
