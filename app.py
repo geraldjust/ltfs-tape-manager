@@ -28,7 +28,7 @@ SG_DEVICE=os.environ.get('SG_DEVICE','/dev/sgX')
 NST_DEVICE=os.environ.get('NST_DEVICE','/dev/nstX')
 WORKER_NAME=os.environ.get('LTFS_WORKER_NAME','aurora-ltfs-1-5')
 MANAGER_NAME=os.environ.get('LTFS_MANAGER_NAME','ltfs-manager-1-5')
-VERSION='1.6.0.7-dev'
+VERSION='1.6.0.8-dev'
 
 def save():
     tmp=STATE/'operation.tmp';tmp.write_text(json.dumps(job));os.replace(tmp,STATE/'operation.json')
@@ -100,6 +100,8 @@ def wait_mode(target, seconds=90):
                 detail=c.logs(tail=60).decode('utf-8','replace')[-4000:]
                 raise RuntimeError('LTFS worker exited before '+target+' mount: '+detail)
         last=mode()
+        if target=='rw' and last=='ro' and media_write_protection(last,c)['state']=='protected':
+            raise RuntimeError('Tape is write-protected. Eject the cartridge, unlock its write-protect switch, and reinsert it. Writing is blocked.')
         if last==target:
             stable+=1
             if stable>=3:
@@ -852,6 +854,24 @@ def diagnostic_snapshot(c):
             except OSError:pass
         return result
 
+def media_write_protection(m=None, c=None):
+    """Report protection only when Aurora explicitly detects it on this mount."""
+    m = mode() if m is None else m
+    if m not in ('ro', 'rw'):
+        return {'state':'unknown','source':'not_mounted'}
+    c = aurora() if c is None else c
+    if not c or c.status != 'running':
+        return {'state':'unknown','source':'worker_unavailable'}
+    try:
+        logs = c.logs(tail=150).decode('utf-8','replace')
+        if 'AFS0018I Medium is write protected' in logs:
+            return {'state':'protected','source':'aurora_mount_log'}
+        if m == 'rw':
+            return {'state':'writable','source':'rw_mount'}
+    except Exception:
+        pass
+    return {'state':'unknown','source':'aurora_mount_log'}
+
 def status_data():
     m=mode();capacity={}
     if m=='ro' and not lock.locked() and job.get('state')!='running':
@@ -877,7 +897,7 @@ def status_data():
         REFRESH_CACHE['presence']=REFRESH_CACHE['presence_detail']['state']
         REFRESH_CACHE['presence_time']=time.monotonic()
     presence='inserted' if m in ('ro','rw') else (REFRESH_CACHE.get('presence','unknown') if not active else 'unknown')
-    return dict(diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active,(drive.get('fields') or {}).get('Unit serial number'))},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,presence_diagnostics=({'state':'inserted','source':'ltfs_mount'} if m in ('ro','rw') else (REFRESH_CACHE.get('presence_detail') if not active else {'state':'unknown','source':'operation_active'})),mount_failure=mount_failure(),
+    return dict(write_protection=media_write_protection(m,c),diagnostics={**diagnostic_snapshot(c),'drive_errors':drive_error_statistics(m,active,(drive.get('fields') or {}).get('Unit serial number'))},ok=True,version=VERSION,mount=m,volume_identity=mounted_volume_identity(m),aurora=c.status if c else 'missing',capacity=capacity,system_state=system_state(m,active,presence),presence=presence,presence_diagnostics=({'state':'inserted','source':'ltfs_mount'} if m in ('ro','rw') else (REFRESH_CACHE.get('presence_detail') if not active else {'state':'unknown','source':'operation_active'})),mount_failure=mount_failure(),
         operation=job,drive=drive,health=health,temperature=temperature,tape=tape,
         paths={'read':HOST_DEST,'write':HOST_SOURCE},controls_busy=active)
 
@@ -1201,6 +1221,7 @@ def write_start():
     try:
         if job.get('state')=='running':raise RuntimeError('Another operation is running')
         if mode()!='ro':raise RuntimeError('Mount LTFS read-only first')
+        if media_write_protection('ro')['state']=='protected':raise RuntimeError('Tape is write-protected. Eject it, unlock the cartridge switch, and reinsert it before writing.')
         busy=busy_mount_users()
         if busy:raise RuntimeError('Tape is busy: '+str(busy))
         aurora_exec(['sh','-c','command -v sha256sum >/dev/null && command -v cat >/dev/null && command -v mkdir >/dev/null && command -v dirname >/dev/null'])
